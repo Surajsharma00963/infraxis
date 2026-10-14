@@ -1,0 +1,329 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+:root {
+  --background: #f8fafc;
+  --foreground: #0f172a;
+  --panel: rgba(255, 255, 255, 0.9);
+  --panel-elevated: #ffffff;
+  --panel-border: #e2e8f0;
+  --border: #e2e8f0;
+  --card-shadow: 0 4px 20px -2px rgba(0, 0, 0, 0.05), 0 2px 6px -1px rgba(0, 0, 0, 0.02);
+  --surface-alt: #f1f5f9;
+  --surface-muted: #e2e8f0;
+  --input-bg: #ffffff;
+  --input-border: #cbd5e1;
+  --text-primary: #0f172a;
+  --text-secondary: #334155;
+  --text-muted: #64748b;
+}
+
+.dark {
+  --background: #070c18;
+  --foreground: #f1f5f9;
+  --panel: rgba(15, 23, 42, 0.75);
+  --panel-elevated: rgba(21, 32, 54, 0.85);
+  --panel-border: rgba(255, 255, 255, 0.12);
+  --border: rgba(255, 255, 255, 0.08);
+  --card-shadow: 0 10px 30px -10px rgba(0, 0, 0, 0.5);
+  --surface-alt: rgba(2, 6, 23, 0.7);
+  --surface-muted: rgba(30, 41, 59, 0.8);
+  --input-bg: rgba(2, 6, 23, 0.7);
+  --input-border: #1e293b;
+  --text-primary: #f8fafc;
+  --text-secondary: #cbd5e1;
+  --text-muted: #94a3b8;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-geist-sans), -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  min-height: 100vh;
+  transition: background-color 0.2s ease, color 0.2s ease;
+}
+
+/* Custom Scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: var(--surface-alt);
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(100, 116, 139, 0.4);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(148, 163, 184, 0.6);
+}
+
+/* Glassmorphism Cards */
+.glass-panel {
+  background: var(--panel);
+  backdrop-filter: blur(12px);
+  border: 1px solid var(--panel-border);
+  box-shadow: var(--card-shadow);
+  transition: background 0.2s ease, border-color 0.2s ease;
+}
+
+.glass-panel-elevated {
+  background: var(--panel-elevated);
+  backdrop-filter: blur(16px);
+  border: 1px solid var(--panel-border);
+  box-shadow: var(--card-shadow);
+  transition: background 0.2s ease, border-color 0.2s ease;
+}
+
+/* Terminal code */
+.terminal-code {
+  font-family: var(--font-geist-mono), ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+/* ========================================================
+   LIGHT MODE DESIGN SYSTEM OVERRIDES (Applied when NOT .dark)
+   ======================================================== */
+html:not(.dark),
+html.light {
+  background-color: #f8fafc !important;
+
+  /* Sticky Top Header */
+  header.sticky {
+    background-color: rgba(255, 255, 255, 0.9) !important;
+    border-color: #e2e8f0 !important;
+    box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.05);
+  }
+
+  /* Footer */
+  footer {
+    background-color: #f8fafc !important;
+    border-color: #e2e8f0 !important;
+    color: #64748b !important;
+  }
+
+  /* Headings & prominent text */
+  h1:not([class*="text-white"]),
+  h2:not([class*="text-white"]),
+  h3:not([class*="text-white"]),
+  h4:not([class*="text-white"]) {
+    color: #0f172a;
+  }
+
+  /* Body and label texts (excluding buttons with white text) */
+  p:not([class*="text-white"]):not([class*="text-blue"]):not([class*="text-emerald"]):not([class*="text-rose"]):not([class*="text-amber"]),
+  label:not([class*="text-white"]) {
+    color: #334155;
+  }
+
+  /* Text color class adjustments */
+  .text-slate-100:not([class*="text-white"]):not(button):not(button *) {
+    color: #0f172a;
+  }
+
+  .text-slate-200:not([class*="text-white"]):not(button):not(button *) {
+    color: #1e293b;
+  }
+
+  .text-slate-300:not([class*="text-white"]):not(button):not(button *) {
+    color: #334155;
+  }
+
+  .text-slate-400:not([class*="text-white"]):not(button):not(button *) {
+    color: #64748b;
+  }
+
+  /* White text inside primary blue buttons MUST stay pure white */
+  button.bg-blue-600,
+  button[class*="bg-blue-600"],
+  button[class*="from-blue-600"],
+  button[type="submit"] {
+    color: #ffffff !important;
+  }
+  button.bg-blue-600 *,
+  button[class*="bg-blue-600"] *,
+  button[class*="from-blue-600"] *,
+  button[type="submit"] * {
+    color: #ffffff !important;
+  }
+
+  /* Form inputs & selects */
+  input[type="text"],
+  input[type="email"],
+  input[type="password"],
+  input[type="tel"],
+  input[type="search"],
+  select,
+  textarea {
+    background-color: #ffffff !important;
+    border-color: #cbd5e1 !important;
+    color: #0f172a !important;
+  }
+
+  input::placeholder {
+    color: #94a3b8 !important;
+  }
+
+  /* All dark background utility containers mapped to clean light surfaces */
+  .bg-slate-950,
+  .bg-slate-950\/80,
+  .bg-slate-950\/70,
+  .bg-slate-950\/60,
+  .bg-slate-950\/40,
+  .bg-slate-900,
+  .bg-slate-900\/80,
+  .bg-slate-900\/60,
+  .bg-slate-900\/50 {
+    background-color: #f1f5f9 !important;
+    border-color: #e2e8f0 !important;
+    color: #1e293b;
+  }
+
+  /* Borders across elements */
+  .border-slate-800,
+  .border-slate-800\/80,
+  .border-slate-800\/60,
+  .border-slate-800\/50,
+  .border-slate-700,
+  .border-slate-700\/80 {
+    border-color: #e2e8f0 !important;
+  }
+
+  /* Neutral buttons in light mode */
+  button.bg-slate-800,
+  button.bg-slate-800\/80,
+  button.bg-slate-800\/60,
+  button.bg-slate-900,
+  button.bg-slate-900\/80 {
+    background-color: #ffffff !important;
+    color: #1e293b !important;
+    border-color: #cbd5e1 !important;
+    box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+  }
+
+  button.bg-slate-800:hover,
+  button.bg-slate-800\/80:hover,
+  button.bg-slate-900:hover,
+  button.bg-slate-900\/80:hover {
+    background-color: #f1f5f9 !important;
+    color: #0f172a !important;
+  }
+
+  /* Secondary button themes in light mode */
+  button[class*="bg-amber-50"],
+  button[class*="bg-amber-500\/10"],
+  button[class*="bg-amber-500\/15"] {
+    background-color: #fef3c7 !important;
+    color: #92400e !important;
+    border-color: #fcd34d !important;
+  }
+  button[class*="bg-amber-50"]:hover,
+  button[class*="bg-amber-500\/10"]:hover,
+  button[class*="bg-amber-500\/15"]:hover {
+    background-color: #fde68a !important;
+    color: #78350f !important;
+  }
+
+  button[class*="bg-rose-50"],
+  button[class*="bg-rose-500\/10"],
+  button[class*="bg-rose-500\/15"] {
+    background-color: #ffe4e6 !important;
+    color: #be123c !important;
+    border-color: #fecdd3 !important;
+  }
+  button[class*="bg-rose-50"]:hover,
+  button[class*="bg-rose-500\/10"]:hover,
+  button[class*="bg-rose-500\/15"]:hover {
+    background-color: #fecdd3 !important;
+    color: #9f1239 !important;
+  }
+
+  /* Table styling in light mode */
+  table {
+    border-color: #e2e8f0 !important;
+  }
+
+  thead,
+  thead.bg-slate-950\/60 {
+    background-color: #f8fafc !important;
+    color: #475569 !important;
+    border-color: #e2e8f0 !important;
+  }
+
+  tbody tr {
+    background-color: #ffffff;
+    border-color: #e2e8f0 !important;
+  }
+
+  tbody tr:hover {
+    background-color: rgba(241, 245, 249, 0.8) !important;
+  }
+
+  /* Light mode badge color contrast */
+  .bg-emerald-500\/10,
+  .bg-emerald-500\/15,
+  .bg-emerald-500\/20 {
+    background-color: #ecfdf5 !important;
+    color: #059669 !important;
+    border-color: #a7f3d0 !important;
+  }
+
+  .bg-blue-500\/10,
+  .bg-blue-500\/15,
+  .bg-blue-500\/20 {
+    background-color: #eff6ff !important;
+    color: #2563eb !important;
+    border-color: #bfdbfe !important;
+  }
+
+  .bg-rose-500\/10,
+  .bg-rose-500\/15,
+  .bg-rose-500\/20 {
+    background-color: #fff1f2 !important;
+    color: #e11d48 !important;
+    border-color: #fecdd3 !important;
+  }
+
+  .bg-amber-500\/10,
+  .bg-amber-500\/15,
+  .bg-amber-500\/20 {
+    background-color: #fffbeb !important;
+    color: #d97706 !important;
+    border-color: #fde68a !important;
+  }
+
+  .bg-indigo-500\/10,
+  .bg-indigo-500\/15,
+  .bg-indigo-500\/20 {
+    background-color: #eef2ff !important;
+    color: #4f46e5 !important;
+    border-color: #c7d2fe !important;
+  }
+
+  /* Terminal log viewport in Light Mode */
+  .terminal-code,
+  pre.terminal-code {
+    background-color: #ffffff !important;
+    color: #0f172a !important;
+    border-color: #e2e8f0 !important;
+  }
+
+  pre.terminal-code span,
+  pre.terminal-code code {
+    color: inherit;
+  }
+}
+
+/* Dark Mode Terminal Overrides */
+.dark .terminal-code,
+.dark pre.terminal-code {
+  background-color: #050811 !important;
+  color: #f1f5f9 !important;
+  border-color: #1e293b !important;
+}
+
+.dark pre.terminal-code span,
+.dark pre.terminal-code code {
+  color: inherit;
+}

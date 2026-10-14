@@ -1,0 +1,39 @@
+# Infraxis Local Infrastructure (PostgreSQL & Redis)
+# Run: docker compose up -d
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: infraxis-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: infraxis
+      POSTGRES_USER: ci_user
+      POSTGRES_PASSWORD: ci_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - infraxis_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ci_user -d infraxis"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: infraxis-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - infraxis_redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  infraxis_pgdata:
+  infraxis_redisdata:

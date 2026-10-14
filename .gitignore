@@ -1,0 +1,11 @@
+node_modules/
+data/
+artifacts/
+.env
+*.log
+.DS_Store
+worker/.env
+web/.next/
+web/node_modules/
+work/
+

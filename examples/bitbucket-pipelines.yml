@@ -1,0 +1,7 @@
+pipelines:
+  pull-requests:
+    "**":
+      - step:
+          name: Notify custom CI (optional)
+          script:
+            - echo "Custom CI receives PR webhooks; builds execute on your own workers."
