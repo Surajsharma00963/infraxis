@@ -1,9 +1,15 @@
 "use client";
 
 import React, { useState, useEffect } from "react";
-import { Package, Download, RotateCw, Loader2 } from "lucide-react";
+import { Package, Download, RotateCw, Loader2, Trash2 } from "lucide-react";
 import { Artifact } from "../types/ci";
-import { apiFetch, downloadArtifactFile, timeAgo } from "../lib/api";
+import {
+  apiFetch,
+  downloadArtifactFile,
+  deleteArtifactFile,
+  clearAllArtifacts,
+  timeAgo,
+} from "../lib/api";
 
 interface ExtendedArtifact extends Artifact {
   repo?: string;
@@ -27,6 +33,8 @@ export default function BuildArtifactsTable({
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [isClearingAll, setIsClearingAll] = useState<boolean>(false);
   const [filterMode, setFilterMode] = useState<"all" | "selected">("all");
 
   // useEffect(() => {
@@ -84,6 +92,44 @@ export default function BuildArtifactsTable({
     }
   };
 
+  const handleDelete = async (id: string, filename: string) => {
+    if (
+      !window.confirm(
+        `Are you sure you want to permanently delete "${filename}"? This action cannot be undone.`,
+      )
+    ) {
+      return;
+    }
+    try {
+      setDeletingId(id);
+      await deleteArtifactFile(id, token);
+      setArtifacts((prev) => prev.filter((a) => a.id !== id));
+    } catch (err: any) {
+      alert(`Failed to delete artifact: ${err?.message || "Unknown error"}`);
+    } finally {
+      setDeletingId(null);
+    }
+  };
+
+  const handleClearAll = async () => {
+    if (
+      !window.confirm(
+        `Are you sure you want to delete all ${artifacts.length} build artifacts from disk and database? This action cannot be undone.`,
+      )
+    ) {
+      return;
+    }
+    try {
+      setIsClearingAll(true);
+      await clearAllArtifacts(token);
+      setArtifacts([]);
+    } catch (err: any) {
+      alert(`Failed to clear artifacts: ${err?.message || "Unknown error"}`);
+    } finally {
+      setIsClearingAll(false);
+    }
+  };
+
   return (
     <div className="glass-panel-elevated rounded-2xl overflow-hidden border border-slate-200 dark:border-slate-800 transition-all">
       {/* Panel Header */}
@@ -134,6 +180,23 @@ export default function BuildArtifactsTable({
               </button>
             </div>
           )} */}
+
+          {artifacts.length > 0 && (
+            <button
+              type="button"
+              onClick={handleClearAll}
+              disabled={isClearingAll || isRefreshing}
+              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium bg-rose-500/10 hover:bg-rose-500/20 text-rose-600 dark:text-rose-400 border border-rose-500/20 rounded-lg transition-all cursor-pointer disabled:opacity-50"
+              title="Delete all artifacts"
+            >
+              {isClearingAll ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <Trash2 className="w-3.5 h-3.5" />
+              )}
+              Clear All
+            </button>
+          )}
 
           <button
             type="button"
@@ -270,20 +333,35 @@ export default function BuildArtifactsTable({
                     </td>
 
                     <td className="py-3.5 px-4 whitespace-nowrap text-right">
-                      <button
-                        type="button"
-                        onClick={() => handleDownload(a.id, a.filename)}
-                        disabled={isDownloading}
-                        className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-500 active:bg-blue-700 text-white rounded-lg shadow-xs hover:shadow transition-all font-semibold text-xs cursor-pointer disabled:opacity-50"
-                        title="Download artifact"
-                      >
-                        {isDownloading ? (
-                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                        ) : (
-                          <Download className="w-3.5 h-3.5" />
-                        )}
-                        Download
-                      </button>
+                      <div className="flex items-center justify-end gap-2">
+                        <button
+                          type="button"
+                          onClick={() => handleDownload(a.id, a.filename)}
+                          disabled={isDownloading || deletingId === a.id}
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-500 active:bg-blue-700 text-white rounded-lg shadow-xs hover:shadow transition-all font-semibold text-xs cursor-pointer disabled:opacity-50"
+                          title="Download artifact"
+                        >
+                          {isDownloading ? (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          ) : (
+                            <Download className="w-3.5 h-3.5" />
+                          )}
+                          Download
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleDelete(a.id, a.filename)}
+                          disabled={deletingId === a.id || isDownloading}
+                          className="inline-flex items-center gap-1.5 px-2.5 py-1.5 bg-slate-100 hover:bg-rose-500/15 dark:bg-slate-800 dark:hover:bg-rose-500/20 text-slate-600 hover:text-rose-600 dark:text-slate-400 dark:hover:text-rose-400 border border-slate-200 hover:border-rose-500/30 dark:border-slate-700 dark:hover:border-rose-500/30 rounded-lg transition-all text-xs font-medium cursor-pointer disabled:opacity-50"
+                          title={`Delete ${a.filename}`}
+                        >
+                          {deletingId === a.id ? (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin text-rose-500" />
+                          ) : (
+                            <Trash2 className="w-3.5 h-3.5" />
+                          )}
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 );

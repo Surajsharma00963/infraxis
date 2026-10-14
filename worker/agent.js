@@ -729,7 +729,7 @@ async function execute(job) {
           if (pbx.includes("com.apple.product-type.bundle")) {
             pbx = pbx.replace(
               /(productType\s*=\s*"com\.apple\.product-type\.bundle";[\s\S]*?buildSettings\s*=\s*\{)/g,
-              '$1\n\t\t\t\tCODE_SIGNING_ALLOWED = NO;'
+              "$1\n\t\t\t\tCODE_SIGNING_ALLOWED = NO;",
             );
           }
           if (patchedCount > 0) {
@@ -953,8 +953,8 @@ async function execute(job) {
         if (
           isSigningEnabled &&
           (archiveErr.message.includes("65") ||
-           archiveErr.message.includes("provisioning") ||
-           archiveErr.message.includes("signing"))
+            archiveErr.message.includes("provisioning") ||
+            archiveErr.message.includes("signing"))
         ) {
           await log(
             job,
@@ -1011,7 +1011,7 @@ async function execute(job) {
 
           if (!exportOptionsPath) {
             exportOptionsPath = path.join(src, "build/ios/ExportOptions.plist");
-            const style = (codeSignStyle || "automatic").toLowerCase();
+            const style = (jobMeta.iosSigningMode || "automatic").toLowerCase();
             const plistContent = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -1104,20 +1104,132 @@ ${devTeam ? `    <key>teamID</key>\n    <string>${devTeam}</string>\n` : ""}    
             .scripts || {};
       } catch {}
 
+      const jobMeta = job.metadata || {};
+      const strictLint =
+        jobMeta.strictLint === true || process.env.CI_STRICT_LINT === "true";
+      const checkResults = [];
+
+      // 1. Code Quality & Linting
       if (pkgScripts.lint) {
-        await runStep(job, src, pm.cmd, pm.runArgs("lint"));
+        await log(job, "Running Code Quality & Lint Check (lint)...", "system");
+        try {
+          await runStep(job, src, pm.cmd, pm.runArgs("lint"));
+          checkResults.push({
+            name: "Lint Check",
+            status: "PASSED",
+            icon: "✅",
+          });
+        } catch (lintErr) {
+          if (strictLint) {
+            checkResults.push({
+              name: "Lint Check",
+              status: "FAILED",
+              icon: "❌",
+            });
+            throw new Error(
+              `Lint check failed in strict mode: ${lintErr.message}`,
+            );
+          } else {
+            checkResults.push({
+              name: "Lint Check",
+              status: "WARNING (Non-blocking)",
+              icon: "⚠️",
+            });
+            await log(
+              job,
+              `[Infraxis Agent] ⚠️ Lint check completed with issues. Non-blocking mode active: continuing PR verification...`,
+              "system",
+            );
+          }
+        }
       }
+
+      // 2. TypeScript Check
       if (pkgScripts.typecheck) {
-        await runStep(job, src, pm.cmd, pm.runArgs("typecheck"));
+        await log(job, "Running TypeScript Check (typecheck)...", "system");
+        try {
+          await runStep(job, src, pm.cmd, pm.runArgs("typecheck"));
+          checkResults.push({
+            name: "TypeScript Check",
+            status: "PASSED",
+            icon: "✅",
+          });
+        } catch (tcErr) {
+          checkResults.push({
+            name: "TypeScript Check",
+            status: "FAILED",
+            icon: "❌",
+          });
+          throw tcErr;
+        }
       }
-      if (pkgScripts["test:ci"]) {
-        await runStep(job, src, pm.cmd, pm.runArgs("test:ci"));
+
+      // 3. Automated Tests
+      const testScript = pkgScripts["test:ci"]
+        ? "test:ci"
+        : pkgScripts.test
+          ? "test"
+          : null;
+      if (testScript) {
+        await log(job, `Running Automated Tests (${testScript})...`, "system");
+        try {
+          await runStep(job, src, pm.cmd, pm.runArgs(testScript));
+          checkResults.push({
+            name: "Automated Tests",
+            status: "PASSED",
+            icon: "✅",
+          });
+        } catch (testErr) {
+          checkResults.push({
+            name: "Automated Tests",
+            status: "FAILED",
+            icon: "❌",
+          });
+          throw testErr;
+        }
       }
+
+      // 4. Android Build Verification
       if (LABELS.includes("android") && fs.existsSync(androidDir)) {
-        await runStep(job, androidDir, "./gradlew", ["assembleRelease"], {
-          CI: "true",
-        });
+        await log(
+          job,
+          "Verifying Android Compilation (./gradlew assembleRelease)...",
+          "system",
+        );
+        try {
+          await runStep(job, androidDir, "./gradlew", ["assembleRelease"], {
+            CI: "true",
+          });
+          checkResults.push({
+            name: "Android Native Compilation",
+            status: "PASSED",
+            icon: "✅",
+          });
+        } catch (androidErr) {
+          checkResults.push({
+            name: "Android Native Compilation",
+            status: "FAILED",
+            icon: "❌",
+          });
+          throw androidErr;
+        }
       }
+
+      // Final Verification Summary
+      await log(
+        job,
+        "═══════════════════════════════════════════════════════════",
+        "system",
+      );
+      await log(job, "Infraxis PR Verification Report:", "system");
+      for (const r of checkResults) {
+        await log(job, `  ${r.icon} ${r.name}: ${r.status}`, "system");
+      }
+      await log(
+        job,
+        "═══════════════════════════════════════════════════════════",
+        "system",
+      );
     } else {
       throw new Error(`Unsupported job kind: ${job.kind}`);
     }

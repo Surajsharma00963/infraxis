@@ -42,12 +42,10 @@ for (const method of methodsToWrap) {
                 err.message,
               );
               if (!res.headersSent) {
-                res
-                  .status(500)
-                  .json({
-                    error: "Internal server error",
-                    message: err.message,
-                  });
+                res.status(500).json({
+                  error: "Internal server error",
+                  message: err.message,
+                });
               }
             });
           }
@@ -57,12 +55,10 @@ for (const method of methodsToWrap) {
             syncErr.message,
           );
           if (!res.headersSent) {
-            res
-              .status(500)
-              .json({
-                error: "Internal server error",
-                message: syncErr.message,
-              });
+            res.status(500).json({
+              error: "Internal server error",
+              message: syncErr.message,
+            });
           }
         }
       };
@@ -1774,6 +1770,90 @@ app.get("/api/artifacts/:id", requireAdmin, async (req, res) => {
     return res.status(404).json({ error: "Artifact not found" });
   }
   res.download(a.path, a.filename);
+});
+
+app.delete("/api/artifacts/:id", requireAdmin, async (req, res) => {
+  try {
+    const artifact = await db.artifacts.getArtifactById(req.params.id);
+    if (!artifact) {
+      return res.status(404).json({ error: "Artifact not found" });
+    }
+
+    // Remove physical file from disk
+    if (artifact.path && fs.existsSync(artifact.path)) {
+      try {
+        fs.unlinkSync(artifact.path);
+        // Clean up parent directory if empty
+        const parentDir = path.dirname(artifact.path);
+        if (
+          fs.existsSync(parentDir) &&
+          fs.readdirSync(parentDir).length === 0
+        ) {
+          fs.rmdirSync(parentDir);
+        }
+      } catch (err) {
+        console.warn(
+          `[Artifacts] Warning deleting file ${artifact.path}:`,
+          err.message,
+        );
+      }
+    }
+
+    await db.artifacts.deleteArtifactById(req.params.id);
+
+    await db.audit
+      .recordAuditEvent({
+        action: "artifact.deleted",
+        actor: req.user?.username || req.token || "administrator",
+        entityType: "artifact",
+        entityId: req.params.id,
+        metadata: { filename: artifact.filename, jobId: artifact.job_id },
+      })
+      .catch(() => {});
+
+    res.json({ ok: true, id: req.params.id, filename: artifact.filename });
+  } catch (err) {
+    console.error(`[Artifacts] Error deleting artifact ${req.params.id}:`, err);
+    res
+      .status(500)
+      .json({ error: "Failed to delete artifact", message: err.message });
+  }
+});
+
+app.delete("/api/artifacts", requireAdmin, async (req, res) => {
+  try {
+    const deleted = await db.artifacts.deleteAllArtifacts();
+    for (const a of deleted) {
+      if (a.path && fs.existsSync(a.path)) {
+        try {
+          fs.unlinkSync(a.path);
+          const parentDir = path.dirname(a.path);
+          if (
+            fs.existsSync(parentDir) &&
+            fs.readdirSync(parentDir).length === 0
+          ) {
+            fs.rmdirSync(parentDir);
+          }
+        } catch {}
+      }
+    }
+
+    await db.audit
+      .recordAuditEvent({
+        action: "artifacts.cleared",
+        actor: req.user?.username || req.token || "administrator",
+        entityType: "artifact",
+        metadata: { count: deleted.length },
+      })
+      .catch(() => {});
+
+    res.json({ ok: true, count: deleted.length });
+  } catch (err) {
+    console.error("[Artifacts] Error clearing all artifacts:", err);
+    res
+      .status(500)
+      .json({ error: "Failed to clear artifacts", message: err.message });
+  }
 });
 
 app.post("/api/jobs/:id/finish", requireWorker, async (req, res) => {
