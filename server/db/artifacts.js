@@ -107,10 +107,30 @@ async function listAllArtifacts(limit = 100) {
   }));
 }
 
+async function deleteArtifactById(id) {
+  const res = await query(
+    `DELETE FROM artifacts
+     WHERE id = $1
+     RETURNING id, job_id, filename, path`,
+    [id]
+  );
+  return res.rows[0] || null;
+}
+
+async function deleteAllArtifacts() {
+  const res = await query(
+    `DELETE FROM artifacts
+     RETURNING id, job_id, filename, path`
+  );
+  return res.rows;
+}
+
 module.exports = {
   createArtifactMetadata,
   listArtifactsByJobId,
   listAllArtifacts,
   getArtifactById,
+  deleteArtifactById,
+  deleteAllArtifacts,
 };
 

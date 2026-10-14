@@ -43,10 +43,13 @@ export default function QueueBuildForm({
 
   // Dynamic iOS Code Signing & Export State
   const [iosIdentities, setIosIdentities] = useState<IosSigningIdentity[]>([]);
-  const [selectedIosIdentity, setSelectedIosIdentity] = useState<string>("auto");
+  const [selectedIosIdentity, setSelectedIosIdentity] =
+    useState<string>("auto");
   const [iosExportMethod, setIosExportMethod] = useState<string>("development");
   const [iosTeamId, setIosTeamId] = useState<string>("");
-  const [isLoadingIdentities, setIsLoadingIdentities] = useState<boolean>(false);
+  const [isLoadingIdentities, setIsLoadingIdentities] =
+    useState<boolean>(false);
+  const [strictLint, setStrictLint] = useState<boolean>(false);
 
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isInspecting, setIsInspecting] = useState(false);
@@ -174,14 +177,18 @@ export default function QueueBuildForm({
           selectedIosIdentity === "disabled"
             ? "disabled"
             : selectedIosIdentity === "auto"
-            ? "auto"
-            : "manual",
+              ? "auto"
+              : "manual",
         iosCodeSignIdentity:
           selectedIosIdentity !== "auto" && selectedIosIdentity !== "disabled"
             ? selectedIosIdentity
             : undefined,
         iosTeamId: iosTeamId.trim() || undefined,
         iosExportMethod: iosExportMethod,
+      };
+    } else if (kind === "pr-checks") {
+      body.metadata = {
+        strictLint,
       };
     }
 
@@ -221,7 +228,8 @@ export default function QueueBuildForm({
             Queue Build
           </h2>
           <p className="text-xs text-slate-400 mt-0.5">
-            Orchestrate multi-platform builds and releases with dedicated Infraxis Agents
+            Orchestrate multi-platform builds and releases with dedicated
+            Infraxis Agents
           </p>
         </div>
 
@@ -419,7 +427,9 @@ export default function QueueBuildForm({
                     ● {iosIdentities.length} Identity(ies) Detected
                   </span>
                 ) : (
-                  <span className="text-amber-400">● Automatic Xcode Signing</span>
+                  <span className="text-amber-400">
+                    ● Automatic Xcode Signing
+                  </span>
                 )}
               </span>
             </div>
@@ -508,8 +518,67 @@ export default function QueueBuildForm({
             </div>
 
             <p className="text-[11px] text-slate-400 leading-relaxed">
-              Infraxis dynamically inspects your checked-out <code className="text-blue-300">project.pbxproj</code>, matches valid certificates in Keychain, generates a matching <code className="text-blue-300">ExportOptions.plist</code>, and exports a signed <code className="text-blue-300">.ipa</code> automatically.
+              Infraxis dynamically inspects your checked-out{" "}
+              <code className="text-blue-300">project.pbxproj</code>, matches
+              valid certificates in Keychain, generates a matching{" "}
+              <code className="text-blue-300">ExportOptions.plist</code>, and
+              exports a signed <code className="text-blue-300">.ipa</code>{" "}
+              automatically.
             </p>
+          </div>
+        )}
+
+        {/* PR Verification Policy Panel */}
+        {kind === "pr-checks" && (
+          <div className="p-4 bg-slate-900/60 border border-slate-800 rounded-xl space-y-3.5 transition-all animate-fadeIn">
+            <div className="flex items-center justify-between pb-2 border-b border-slate-800/80">
+              <div className="flex items-center gap-2">
+                <CheckCircle className="w-4 h-4 text-sky-400 shrink-0" />
+                <span className="text-xs font-semibold text-slate-200">
+                  PR Verification & Quality Gate Policy
+                </span>
+              </div>
+              <span className="text-[11px] font-mono text-slate-400">
+                {strictLint ? (
+                  <span className="text-amber-400">
+                    ● Strict Lint Enforcement
+                  </span>
+                ) : (
+                  <span className="text-emerald-400">
+                    ● Advisory Non-blocking Lint
+                  </span>
+                )}
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <div className="space-y-1">
+                <label className="text-[11px] font-medium text-slate-300">
+                  Lint Failure Policy
+                </label>
+                <select
+                  value={strictLint ? "strict" : "advisory"}
+                  onChange={(e) => setStrictLint(e.target.value === "strict")}
+                  className="w-full px-2.5 py-1.5 text-xs bg-slate-950/80 border border-slate-800 rounded-lg text-slate-100 focus:outline-none focus:border-blue-500 cursor-pointer"
+                >
+                  <option value="advisory">
+                    ⚡ Advisory Mode (Report all lint issues, proceed with
+                    Native Builds & Tests)
+                  </option>
+                  <option value="strict">
+                    🛑 Strict Mode (Fail entire PR pipeline on any ESLint error)
+                  </option>
+                </select>
+              </div>
+
+              <div className="flex flex-col justify-center text-[11px] text-slate-400 leading-relaxed pl-1">
+                <span>
+                  {strictLint
+                    ? "Build will immediately abort if ESLint encounters any error."
+                    : "Full lint diagnostics and warnings are logged, but typecheck, automated test suites, and Android release compilation will proceed to completion."}
+                </span>
+              </div>
+            </div>
           </div>
         )}
 

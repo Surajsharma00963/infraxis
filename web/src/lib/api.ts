@@ -81,6 +81,22 @@ export async function downloadArtifactFile(
   URL.revokeObjectURL(url);
 }
 
+export async function deleteArtifactFile(id: string, token?: string) {
+  return apiFetch<{ ok: boolean; id: string }>(
+    `/api/artifacts/${encodeURIComponent(id)}`,
+    { method: "DELETE" },
+    token,
+  );
+}
+
+export async function clearAllArtifacts(token?: string) {
+  return apiFetch<{ ok: boolean; count: number }>(
+    "/api/artifacts",
+    { method: "DELETE" },
+    token,
+  );
+}
+
 export function timeAgo(isoDate: string): string {
   if (!isoDate) return "just now";
   const diffSec = Math.floor((Date.now() - new Date(isoDate).getTime()) / 1000);
