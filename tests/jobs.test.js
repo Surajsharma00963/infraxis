@@ -184,6 +184,7 @@ test("Stale job recovery when worker crashes", async () => {
     kind: "android-debug",
     requestedBy: "test-suite",
     maxRetries: 2,
+    priority: 9999,
   });
 
   await db.workers.upsertWorkerHeartbeat({
