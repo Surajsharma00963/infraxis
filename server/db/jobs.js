@@ -3,9 +3,13 @@
 const crypto = require("crypto");
 const { query, withTransaction } = require("./pool");
 const { recordAuditEvent } = require("./audit");
+const { matchWorkerCapabilities } = require("../services/capability-matcher");
 
 const SUPPORTED_KINDS = [
   "pr-checks",
+  "dev-build",
+  "release-build",
+  "custom-pipeline",
   "android-debug",
   "android-release",
   "ios-simulator",
@@ -13,7 +17,6 @@ const SUPPORTED_KINDS = [
 ];
 
 const REQUIRED_LABELS = {
-  "pr-checks": ["android"],
   "android-debug": ["android"],
   "android-release": ["android"],
   "ios-simulator": ["ios"],
@@ -41,14 +44,19 @@ function formatJob(row) {
     created_at: row.created_at ? new Date(row.created_at).toISOString() : null,
     queued_at: row.queued_at ? new Date(row.queued_at).toISOString() : null,
     started_at: row.started_at ? new Date(row.started_at).toISOString() : null,
-    finished_at: row.finished_at ? new Date(row.finished_at).toISOString() : null,
+    finished_at: row.finished_at
+      ? new Date(row.finished_at).toISOString()
+      : null,
     exit_code: row.exit_code != null ? Number(row.exit_code) : null,
     error: row.error || null,
     retry_count: Number(row.retry_count ?? 0),
     max_retries: Number(row.max_retries ?? 2),
     timeout_seconds: Number(row.timeout_seconds ?? 3600),
     idempotency_key: row.idempotency_key || null,
-    metadata: typeof row.metadata === "string" ? JSON.parse(row.metadata) : (row.metadata || {}),
+    metadata:
+      typeof row.metadata === "string"
+        ? JSON.parse(row.metadata)
+        : row.metadata || {},
   };
 }
 
@@ -61,7 +69,7 @@ async function listJobs(limit = 100) {
   const safeLimit = Math.min(Math.max(Number(limit) || 100, 1), 500);
   const res = await query(
     "SELECT * FROM jobs ORDER BY created_at DESC LIMIT $1",
-    [safeLimit]
+    [safeLimit],
   );
   return res.rows.map(formatJob);
 }
@@ -87,7 +95,7 @@ async function createJob({
     if (idempotencyKey) {
       const existing = await client.query(
         "SELECT * FROM jobs WHERE idempotency_key = $1",
-        [idempotencyKey]
+        [idempotencyKey],
       );
       if (existing.rows.length > 0) {
         return {
@@ -126,7 +134,7 @@ async function createJob({
         timeoutSeconds,
         idempotencyKey,
         JSON.stringify(metadata || {}),
-      ]
+      ],
     );
 
     const job = formatJob(insertRes.rows[0]);
@@ -140,7 +148,7 @@ async function createJob({
         requestedBy,
         id,
         JSON.stringify({ kind, repo, branch, commitHash: cleanCommit }),
-      ]
+      ],
     );
 
     return { job, isDuplicate: false };
@@ -151,7 +159,14 @@ async function createJob({
  * Atomic concurrent job claiming using SELECT ... FOR UPDATE SKIP LOCKED
  * Guarantees that multiple Infraxis Agents never claim the same job simultaneously.
  */
-async function claimNextJob({ workerId, labels = [] }) {
+async function claimNextJob({
+  workerId,
+  labels = [],
+  capabilities = {},
+  platform = "unknown",
+  arch = "unknown",
+}) {
+  const worker = { id: workerId, labels, capabilities, platform, arch };
   const workerLabelsSet = new Set(labels);
   const canHandleKinds = [];
   for (const [kind, req] of Object.entries(REQUIRED_LABELS)) {
@@ -160,9 +175,9 @@ async function claimNextJob({ workerId, labels = [] }) {
     }
   }
 
-  if (canHandleKinds.length === 0) {
-    return null;
-  }
+  // Universal profiles that any worker can run unless the job requires special capabilities
+  const universalKinds = ["pr-checks", "dev-build", "release-build", "custom-pipeline"];
+  const allEligibleKinds = Array.from(new Set([...canHandleKinds, ...universalKinds]));
 
   return await withTransaction(async (client) => {
     // 1. Fetch exactly 1 compatible queued job with row lock, skipping locked rows
@@ -172,7 +187,7 @@ async function claimNextJob({ workerId, labels = [] }) {
        ORDER BY priority DESC, created_at ASC
        FOR UPDATE SKIP LOCKED
        LIMIT 1`,
-      [canHandleKinds]
+      [allEligibleKinds]
     );
 
     if (candidateRes.rows.length === 0) {
@@ -180,6 +195,11 @@ async function claimNextJob({ workerId, labels = [] }) {
     }
 
     const matchedRow = candidateRes.rows[0];
+    const formatted = formatJob(matchedRow);
+    if (!matchWorkerCapabilities({ worker, job: formatted })) {
+      return null;
+    }
+
     const now = new Date().toISOString();
     const nextAttempt = (matchedRow.retry_count || 0) + 1;
 
@@ -189,7 +209,7 @@ async function claimNextJob({ workerId, labels = [] }) {
        SET status = 'running', worker_id = $1, started_at = $2
        WHERE id = $3 AND status = 'queued'
        RETURNING *`,
-      [workerId, now, matchedRow.id]
+      [workerId, now, matchedRow.id],
     );
 
     if (updateRes.rows.length === 0) {
@@ -204,7 +224,7 @@ async function claimNextJob({ workerId, labels = [] }) {
       ) VALUES ($1, $2, $3, $4, $5, 'running', $5)
       ON CONFLICT (job_id, attempt_number) DO UPDATE
       SET worker_id = EXCLUDED.worker_id, started_at = EXCLUDED.started_at, status = 'running'`,
-      [attemptId, matchedRow.id, nextAttempt, workerId, now]
+      [attemptId, matchedRow.id, nextAttempt, workerId, now],
     );
 
     // 5. Update worker status
@@ -212,7 +232,7 @@ async function claimNextJob({ workerId, labels = [] }) {
       `UPDATE workers
        SET current_job = $1, status = 'busy', last_seen = $2, last_heartbeat = $2
        WHERE id = $3`,
-      [matchedRow.id, now, workerId]
+      [matchedRow.id, now, workerId],
     );
 
     // 6. Record audit log for claim
@@ -224,7 +244,7 @@ async function claimNextJob({ workerId, labels = [] }) {
         workerId,
         matchedRow.id,
         JSON.stringify({ attempt: nextAttempt }),
-      ]
+      ],
     );
 
     const claimedJob = formatJob(updateRes.rows[0]);
@@ -244,7 +264,7 @@ async function finishJob({ jobId, workerId, exitCode, error = null }) {
     // 1. Fetch current job state with lock
     const currentRes = await client.query(
       "SELECT * FROM jobs WHERE id = $1 FOR UPDATE",
-      [jobId]
+      [jobId],
     );
 
     if (currentRes.rows.length === 0) {
@@ -270,7 +290,11 @@ async function finishJob({ jobId, workerId, exitCode, error = null }) {
     }
 
     const now = new Date().toISOString();
-    const finalExitCode = Number.isInteger(exitCode) ? Number(exitCode) : (error ? 1 : 0);
+    const finalExitCode = Number.isInteger(exitCode)
+      ? Number(exitCode)
+      : error
+        ? 1
+        : 0;
     const isSuccess = finalExitCode === 0;
     const finalStatus = isSuccess ? "succeeded" : "failed";
     const cleanError = typeof error === "string" ? error.slice(0, 2000) : null;
@@ -281,7 +305,7 @@ async function finishJob({ jobId, workerId, exitCode, error = null }) {
        SET status = $1, finished_at = $2, exit_code = $3, error = $4
        WHERE id = $5
        RETURNING *`,
-      [finalStatus, now, finalExitCode, cleanError, jobId]
+      [finalStatus, now, finalExitCode, cleanError, jobId],
     );
 
     // 3. Update current attempt
@@ -290,7 +314,7 @@ async function finishJob({ jobId, workerId, exitCode, error = null }) {
       `UPDATE job_attempts
        SET finished_at = $1, exit_code = $2, failure_reason = $3, status = $4
        WHERE job_id = $5 AND attempt_number = $6`,
-      [now, finalExitCode, cleanError, finalStatus, jobId, attemptNum]
+      [now, finalExitCode, cleanError, finalStatus, jobId, attemptNum],
     );
 
     // 4. Free worker
@@ -299,7 +323,7 @@ async function finishJob({ jobId, workerId, exitCode, error = null }) {
         `UPDATE workers
          SET current_job = NULL, status = 'idle', last_seen = $1
          WHERE id = $2 AND current_job = $3`,
-        [now, job.worker_id, jobId]
+        [now, job.worker_id, jobId],
       );
     }
 
@@ -312,7 +336,7 @@ async function finishJob({ jobId, workerId, exitCode, error = null }) {
         job.worker_id || "worker",
         jobId,
         JSON.stringify({ status: finalStatus, exitCode: finalExitCode }),
-      ]
+      ],
     );
 
     return {
@@ -330,7 +354,7 @@ async function cancelJob(jobId, actor = "administrator") {
   return await withTransaction(async (client) => {
     const currentRes = await client.query(
       "SELECT * FROM jobs WHERE id = $1 FOR UPDATE",
-      [jobId]
+      [jobId],
     );
 
     if (currentRes.rows.length === 0) {
@@ -352,21 +376,21 @@ async function cancelJob(jobId, actor = "administrator") {
        SET status = 'cancelled', finished_at = $1, error = 'Cancelled by administrator'
        WHERE id = $2
        RETURNING *`,
-      [now, jobId]
+      [now, jobId],
     );
 
     // Insert log line
     await client.query(
       `INSERT INTO logs (job_id, attempt_number, seq, at, stream, line)
        VALUES ($1, $2, 999999, $3, 'stderr', 'Job was cancelled by administrator.')`,
-      [jobId, (job.retry_count || 0) + 1, now]
+      [jobId, (job.retry_count || 0) + 1, now],
     );
 
     // Free worker if running
     if (job.worker_id) {
       await client.query(
         "UPDATE workers SET current_job = NULL, status = 'idle', last_seen = $1 WHERE id = $2",
-        [now, job.worker_id]
+        [now, job.worker_id],
       );
     }
 
@@ -374,7 +398,7 @@ async function cancelJob(jobId, actor = "administrator") {
     await client.query(
       `INSERT INTO audit_events (id, action, actor, entity_type, entity_id, metadata, created_at)
        VALUES ($1, 'job:cancelled', $2, 'job', $3, '{}'::jsonb, NOW())`,
-      [crypto.randomUUID(), actor, jobId]
+      [crypto.randomUUID(), actor, jobId],
     );
 
     return {
@@ -390,7 +414,7 @@ async function cancelJob(jobId, actor = "administrator") {
 async function cancelAllJobs(actor = "administrator") {
   return await withTransaction(async (client) => {
     const activeRes = await client.query(
-      "SELECT id, worker_id, retry_count FROM jobs WHERE status IN ('queued', 'running', 'claimed') FOR UPDATE"
+      "SELECT id, worker_id, retry_count FROM jobs WHERE status IN ('queued', 'running', 'claimed') FOR UPDATE",
     );
 
     const now = new Date().toISOString();
@@ -401,19 +425,21 @@ async function cancelAllJobs(actor = "administrator") {
         `UPDATE jobs
          SET status = 'cancelled', finished_at = $1, error = 'Cancelled by administrator'
          WHERE id = $2`,
-        [now, j.id]
+        [now, j.id],
       );
 
       await client.query(
         `INSERT INTO logs (job_id, attempt_number, seq, at, stream, line)
          VALUES ($1, $2, 999999, $3, 'stderr', 'Job was cancelled by administrator.')`,
-        [j.id, (j.retry_count || 0) + 1, now]
+        [j.id, (j.retry_count || 0) + 1, now],
       );
 
       cancelledIds.push(j.id);
     }
 
-    await client.query("UPDATE workers SET current_job = NULL, status = 'idle'");
+    await client.query(
+      "UPDATE workers SET current_job = NULL, status = 'idle'",
+    );
 
     await client.query(
       `INSERT INTO audit_events (id, action, actor, entity_type, entity_id, metadata, created_at)
@@ -422,7 +448,7 @@ async function cancelAllJobs(actor = "administrator") {
         crypto.randomUUID(),
         actor,
         JSON.stringify({ cancelledCount: cancelledIds.length }),
-      ]
+      ],
     );
 
     return { ok: true, cancelledCount: cancelledIds.length, cancelledIds };
@@ -434,7 +460,10 @@ async function cancelAllJobs(actor = "administrator") {
  */
 async function deleteJob(jobId, actor = "administrator") {
   return await withTransaction(async (client) => {
-    const checkRes = await client.query("SELECT * FROM jobs WHERE id = $1 FOR UPDATE", [jobId]);
+    const checkRes = await client.query(
+      "SELECT * FROM jobs WHERE id = $1 FOR UPDATE",
+      [jobId],
+    );
     if (checkRes.rows.length === 0) {
       return { ok: false, error: "Job not found" };
     }
@@ -445,7 +474,7 @@ async function deleteJob(jobId, actor = "administrator") {
     if (job.worker_id) {
       await client.query(
         "UPDATE workers SET current_job = NULL, status = 'idle' WHERE id = $1 AND current_job = $2",
-        [job.worker_id, jobId]
+        [job.worker_id, jobId],
       );
     }
 
@@ -455,7 +484,7 @@ async function deleteJob(jobId, actor = "administrator") {
     await client.query(
       `INSERT INTO audit_events (id, action, actor, entity_type, entity_id, metadata, created_at)
        VALUES ($1, 'job:deleted', $2, 'job', $3, '{}'::jsonb, NOW())`,
-      [crypto.randomUUID(), actor, jobId]
+      [crypto.randomUUID(), actor, jobId],
     );
 
     return { ok: true, id: jobId };
@@ -471,12 +500,14 @@ async function clearAllJobs(actor = "administrator") {
     await client.query("DELETE FROM artifacts");
     await client.query("DELETE FROM job_attempts");
     await client.query("DELETE FROM jobs");
-    await client.query("UPDATE workers SET current_job = NULL, status = 'idle'");
+    await client.query(
+      "UPDATE workers SET current_job = NULL, status = 'idle'",
+    );
 
     await client.query(
       `INSERT INTO audit_events (id, action, actor, entity_type, entity_id, metadata, created_at)
        VALUES ($1, 'system:clear_all', $2, 'system', NULL, '{}'::jsonb, NOW())`,
-      [crypto.randomUUID(), actor]
+      [crypto.randomUUID(), actor],
     );
 
     return { ok: true };
@@ -497,7 +528,7 @@ async function recoverStaleJobs(staleSeconds = 90) {
        JOIN workers w ON j.worker_id = w.id
        WHERE j.status = 'running' AND w.last_seen < $1
        FOR UPDATE OF j`,
-      [cutoff]
+      [cutoff],
     );
 
     const recovered = [];
@@ -513,7 +544,7 @@ async function recoverStaleJobs(staleSeconds = 90) {
           `UPDATE jobs
            SET status = 'queued', worker_id = NULL, retry_count = $1, queued_at = $2
            WHERE id = $3`,
-          [retryCount, now, job.id]
+          [retryCount, now, job.id],
         );
 
         await client.query(
@@ -524,7 +555,7 @@ async function recoverStaleJobs(staleSeconds = 90) {
             retryCount,
             now,
             `[Infraxis Core] Worker heartbeat timeout (> ${staleSeconds}s). Re-queueing job (retry ${retryCount}/${maxRetries}).`,
-          ]
+          ],
         );
 
         recovered.push({ id: job.id, action: "requeued", retryCount });
@@ -535,13 +566,13 @@ async function recoverStaleJobs(staleSeconds = 90) {
            SET status = 'failed', finished_at = $1, exit_code = 1,
                error = 'Worker heartbeat timed out and retry limit exceeded'
            WHERE id = $2`,
-          [now, job.id]
+          [now, job.id],
         );
 
         await client.query(
           `INSERT INTO logs (job_id, attempt_number, seq, at, stream, line)
            VALUES ($1, $2, 999999, $3, 'stderr', '[Infraxis Core] Build failed: Worker heartbeat timed out and retry limit exceeded.')`,
-          [job.id, retryCount, now]
+          [job.id, retryCount, now],
         );
 
         recovered.push({ id: job.id, action: "failed", retryCount });
@@ -550,7 +581,7 @@ async function recoverStaleJobs(staleSeconds = 90) {
       // Mark stale worker offline
       await client.query(
         "UPDATE workers SET current_job = NULL, status = 'offline' WHERE id = $1",
-        [job.worker_id]
+        [job.worker_id],
       );
     }
 
@@ -565,7 +596,7 @@ async function resetJobForRebuild(jobId) {
   return await withTransaction(async (client) => {
     const res = await client.query(
       "SELECT * FROM jobs WHERE id = $1 FOR UPDATE",
-      [jobId]
+      [jobId],
     );
     if (res.rows.length === 0) return null;
     const job = res.rows[0];
@@ -589,7 +620,7 @@ async function resetJobForRebuild(jobId) {
            retry_count = $2
        WHERE id = $3
        RETURNING *`,
-      [now, nextRetry, jobId]
+      [now, nextRetry, jobId],
     );
 
     // Clean up previous failed logs and artifacts so the rebuilt run is clean
@@ -604,7 +635,7 @@ async function resetJobForRebuild(jobId) {
         crypto.randomUUID(),
         jobId,
         JSON.stringify({ attempt: nextRetry, previous_status: job.status }),
-      ]
+      ],
     );
 
     return formatJob(updateRes.rows[0]);

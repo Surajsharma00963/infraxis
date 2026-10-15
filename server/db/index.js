@@ -9,6 +9,9 @@ const artifacts = require("./artifacts");
 const repositories = require("./repositories");
 const auth = require("./auth");
 const audit = require("./audit");
+const pullRequests = require("./pull-requests");
+const pipelineStages = require("./pipeline-stages");
+const gitAccounts = require("./git-accounts");
 
 module.exports = {
   ...pool,
@@ -20,4 +23,8 @@ module.exports = {
   repositories,
   auth,
   audit,
+  pullRequests,
+  pipelineStages,
+  gitAccounts,
 };
+
