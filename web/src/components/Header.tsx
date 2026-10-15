@@ -93,12 +93,12 @@ export default function Header({
                     title={`Infraxis Agent: ${activeWorker.id} · Labels: ${activeWorker.labels.join(", ")}`}
                   >
                     <Cpu className="w-3.5 h-3.5 text-indigo-500 dark:text-indigo-400" />
-                    <span className="font-mono text-[11px] truncate max-w-35">
+                    <span className="font-mono text-[11px] truncate">
                       {activeWorker.id}
                     </span>
-                    <span className="text-[10px] bg-indigo-500/20 px-1.5 py-0.5 rounded text-indigo-600 dark:text-indigo-200">
+                    {/* <span className="text-[10px] bg-indigo-500/20 px-1.5 py-0.5 rounded text-indigo-600 dark:text-indigo-200">
                       {activeWorker.labels.join(", ")}
-                    </span>
+                    </span> */}
                   </div>
                 )}
 

@@ -7,6 +7,8 @@ import QueueBuildForm from "../components/QueueBuildForm";
 import RecentBuildsTable from "../components/RecentBuildsTable";
 import BuildInspector from "../components/BuildInspector";
 import BuildArtifactsTable from "../components/BuildArtifactsTable";
+import PullRequestsTable from "../components/PullRequestsTable";
+import GitIntegrationsHub from "../components/GitIntegrationsHub";
 import {
   Sparkles,
   Smartphone,
@@ -16,8 +18,11 @@ import {
   Cpu,
   Layers,
   Zap,
+  GitPullRequest,
+  Activity,
+  ArrowUpRight,
 } from "lucide-react";
-import { Job, WorkerInfo } from "../types/ci";
+import { Job, WorkerInfo, PullRequest } from "../types/ci";
 import {
   apiFetch,
   getStoredToken,
@@ -63,6 +68,7 @@ export default function DashboardPage() {
 
   const [jobs, setJobs] = useState<Job[]>([]);
   const [workers, setWorkers] = useState<WorkerInfo[]>([]);
+  const [pullRequests, setPullRequests] = useState<PullRequest[]>([]);
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
   const [isLoadingJobs, setIsLoadingJobs] = useState<boolean>(false);
   const [currentUser, setCurrentUser] = useState<any>(null);
@@ -101,6 +107,17 @@ export default function DashboardPage() {
       const res = await apiFetch<any>("/api/auth/me", {}, authToken);
       if (res && res.user) {
         setCurrentUser(res.user);
+      }
+    } catch {}
+
+    try {
+      const prs = await apiFetch<PullRequest[]>(
+        "/api/pull-requests",
+        {},
+        authToken,
+      );
+      if (prs && Array.isArray(prs)) {
+        setPullRequests(prs);
       }
     } catch {}
   };
@@ -158,6 +175,7 @@ export default function DashboardPage() {
           if (msg.type === "init" || msg.type === "snapshot") {
             setJobs(msg.jobs || []);
             setWorkers(msg.workers || []);
+            if (msg.pullRequests) setPullRequests(msg.pullRequests);
             setIsLoadingJobs(false);
           } else if (msg.type === "jobs") {
             const nextJobs = msg.jobs || [];
@@ -168,6 +186,8 @@ export default function DashboardPage() {
             setWorkers((prev) =>
               areWorkersEqual(prev, nextWorkers) ? prev : nextWorkers,
             );
+          } else if (msg.type === "pull_requests") {
+            setPullRequests(msg.pullRequests || []);
           } else if (msg.type === "error") {
             setAuthError(msg.error || "Authentication failed");
             setIsConnected(false);
@@ -245,6 +265,7 @@ export default function DashboardPage() {
     setCurrentUser(null);
     setJobs([]);
     setWorkers([]);
+    setPullRequests([]);
   };
 
   const handleRefresh = () => {
@@ -252,6 +273,13 @@ export default function DashboardPage() {
       setIsLoadingJobs(true);
       wsRef.current.send(JSON.stringify({ type: "get_state" }));
       setTimeout(() => setIsLoadingJobs(false), 400);
+    }
+    if (activeTokenRef.current) {
+      apiFetch<PullRequest[]>("/api/pull-requests", {}, activeTokenRef.current)
+        .then((prs) => {
+          if (prs && Array.isArray(prs)) setPullRequests(prs);
+        })
+        .catch(() => {});
     }
   };
 
@@ -358,6 +386,14 @@ export default function DashboardPage() {
     }
   };
 
+  const onlineWorkersCount = workers.filter((w) => w.online).length;
+  const activeJobsCount = jobs.filter((j) =>
+    ["queued", "running", "claimed"].includes(j.status),
+  ).length;
+  const pendingPrCount = pullRequests.filter((pr) =>
+    ["pending", "running"].includes(pr.status),
+  ).length;
+
   return (
     <div className="min-h-screen flex flex-col bg-slate-50 text-slate-900 dark:bg-[#070c18] dark:text-slate-100 transition-colors duration-200">
       {/* Top Header */}
@@ -386,103 +422,320 @@ export default function DashboardPage() {
         /* Main Dashboard Layout */
         <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8 animate-fadeIn">
           {/* Welcome & Platform Overview */}
-          <section className="glass-panel-elevated rounded-2xl p-6 sm:p-7 border border-slate-200/90 dark:border-slate-800/80 bg-gradient-to-br from-white via-slate-50/70 to-blue-50/30 dark:bg-gradient-to-br dark:from-slate-900/90 dark:via-[#090f1e]/85 dark:to-indigo-950/25 transition-all shadow-xs dark:shadow-none">
-            <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-6">
-              {/* Left Column: Platform Branding & Workflows */}
-              <div className="space-y-3 max-w-2xl">
+          <section className="relative overflow-hidden rounded-3xl border border-slate-200/80 dark:border-slate-800/80 bg-gradient-to-br from-white via-slate-50/70 to-blue-50/40 dark:from-slate-900/90 dark:via-[#0a101f]/90 dark:to-slate-900/95 p-6 sm:p-8 shadow-xl dark:shadow-2xl dark:shadow-indigo-950/20 backdrop-blur-xl transition-all space-y-6">
+            {/* Ambient Background Glows */}
+            <div className="pointer-events-none absolute -top-24 -left-20 w-80 h-80 rounded-full bg-blue-500/10 dark:bg-blue-600/15 blur-3xl" />
+            <div className="pointer-events-none absolute -bottom-24 -right-16 w-80 h-80 rounded-full bg-indigo-500/10 dark:bg-purple-600/15 blur-3xl" />
+
+            {/* Tech Dot Matrix Overlay */}
+            <div
+              className="pointer-events-none absolute inset-0 opacity-[0.035] dark:opacity-[0.06]"
+              style={{
+                backgroundImage:
+                  "radial-gradient(currentColor 1px, transparent 1px)",
+                backgroundSize: "20px 20px",
+              }}
+            />
+
+            {/* Top Specular Border Highlight */}
+            <div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-blue-500/30 dark:via-blue-400/40 to-transparent" />
+
+            {/* Row 1: Platform Branding & Workflows */}
+            <div className="relative z-10 flex flex-col lg:flex-row lg:items-end lg:justify-between gap-6">
+              <div className="space-y-3 max-w-3xl">
                 {/* Top Badges */}
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-gradient-to-r from-blue-500/10 to-indigo-500/10 text-blue-700 dark:text-blue-300 border border-blue-500/20">
-                    <Sparkles className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
+                <div className="flex flex-wrap items-center gap-2.5">
+                  <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-blue-500/10 text-blue-700 dark:text-blue-300 border border-blue-500/25 shadow-xs backdrop-blur-md">
+                    <Sparkles className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400 animate-pulse" />
                     <span>Universal CI/CD & Software Infrastructure</span>
                   </span>
-                  <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-medium bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20">
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                    Self-Hosted
+
+                  <span className="inline-flex items-center gap-2 px-3 py-1 rounded-full text-[11px] font-medium bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border border-emerald-500/25 backdrop-blur-md">
+                    <span className="relative flex h-2 w-2">
+                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
+                      <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500" />
+                    </span>
+                    <span>Self-Hosted</span>
+                  </span>
+
+                  <span className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium bg-slate-100 dark:bg-slate-800/80 text-slate-600 dark:text-slate-400 border border-slate-200 dark:border-slate-700/70">
+                    <Activity className="w-3 h-3 text-cyan-500" />
+                    <span>Cluster Active</span>
                   </span>
                 </div>
 
-                {/* Primary Headline with subtle gradient */}
-                <h2 className="text-xl sm:text-2xl font-bold tracking-tight bg-gradient-to-r from-slate-900 via-slate-800 to-slate-700 dark:from-white dark:via-slate-100 dark:to-slate-300 bg-clip-text text-transparent">
-                  Infrastructure for every release.
+                {/* Primary Headline with Rich Gradient */}
+                <h2 className="text-2xl sm:text-3xl lg:text-4xl font-extrabold tracking-tight text-slate-900 dark:text-white leading-[1.15]">
+                  Infrastructure for{" "}
+                  <span className="bg-gradient-to-r from-blue-600 via-indigo-600 to-sky-500 dark:from-blue-400 dark:via-indigo-300 dark:to-sky-300 bg-clip-text text-transparent">
+                    every release.
+                  </span>
                 </h2>
 
                 {/* Tagline Description */}
-                <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-400 leading-relaxed">
-                  Infraxis is a self-hosted engineering platform to build, test, and
-                  deliver software across mobile, web, desktop, backend, and containers.
+                <p className="text-sm sm:text-base text-slate-600 dark:text-slate-300/90 leading-relaxed font-normal">
+                  Infraxis is a unified self-hosted engineering platform to
+                  build, test, and deliver software across mobile, web, desktop,
+                  backend, and containers.
                 </p>
+                <div className="flex flex-wrap items-center gap-2 lg:justify-start">
+                  <span className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mr-1 w-full sm:w-auto">
+                    Workflows:
+                  </span>
 
-                {/* Supported Target Badges */}
-                <div className="pt-1 flex flex-wrap items-center gap-2 text-[11px]">
-                  <span className="font-medium text-slate-500 dark:text-slate-400 mr-1">Workflows:</span>
-                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-slate-100 dark:bg-slate-800/80 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700 font-medium">
-                    <Smartphone className="w-3.5 h-3.5 text-sky-500 dark:text-sky-400" />
+                  <button
+                    type="button"
+                    onClick={() =>
+                      document
+                        .getElementById("queue-build-section")
+                        ?.scrollIntoView({ behavior: "smooth" })
+                    }
+                    className="group inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white dark:bg-slate-800/80 hover:bg-sky-50 dark:hover:bg-sky-500/10 border border-slate-200 dark:border-slate-700 hover:border-sky-500/40 text-slate-700 dark:text-slate-300 hover:text-sky-600 dark:hover:text-sky-300 text-xs font-medium transition-all duration-200 shadow-xs hover:shadow-sm hover:-translate-y-0.5 cursor-pointer"
+                    title="Click to queue an iOS or Android build"
+                  >
+                    <Smartphone className="w-3.5 h-3.5 text-sky-500 transition-transform group-hover:scale-110" />
                     <span>iOS & Android</span>
-                  </span>
-                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-slate-100 dark:bg-slate-800/80 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700 font-medium">
-                    <Globe className="w-3.5 h-3.5 text-emerald-500 dark:text-emerald-400" />
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() =>
+                      document
+                        .getElementById("queue-build-section")
+                        ?.scrollIntoView({ behavior: "smooth" })
+                    }
+                    className="group inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white dark:bg-slate-800/80 hover:bg-emerald-50 dark:hover:bg-emerald-500/10 border border-slate-200 dark:border-slate-700 hover:border-emerald-500/40 text-slate-700 dark:text-slate-300 hover:text-emerald-600 dark:hover:text-emerald-400 text-xs font-medium transition-all duration-200 shadow-xs hover:shadow-sm hover:-translate-y-0.5 cursor-pointer"
+                    title="Click to queue a Web or Cloud service build"
+                  >
+                    <Globe className="w-3.5 h-3.5 text-emerald-500 transition-transform group-hover:scale-110" />
                     <span>Web & Cloud</span>
-                  </span>
-                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-slate-100 dark:bg-slate-800/80 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700 font-medium">
-                    <Boxes className="w-3.5 h-3.5 text-indigo-500 dark:text-indigo-400" />
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() =>
+                      document
+                        .getElementById("queue-build-section")
+                        ?.scrollIntoView({ behavior: "smooth" })
+                    }
+                    className="group inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white dark:bg-slate-800/80 hover:bg-indigo-50 dark:hover:bg-indigo-500/10 border border-slate-200 dark:border-slate-700 hover:border-indigo-500/40 text-slate-700 dark:text-slate-300 hover:text-indigo-600 dark:hover:text-indigo-400 text-xs font-medium transition-all duration-200 shadow-xs hover:shadow-sm hover:-translate-y-0.5 cursor-pointer"
+                    title="Click to queue Container builds"
+                  >
+                    <Boxes className="w-3.5 h-3.5 text-indigo-500 transition-transform group-hover:scale-110" />
                     <span>Containers</span>
-                  </span>
-                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-slate-100 dark:bg-slate-800/80 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700 font-medium">
-                    <Terminal className="w-3.5 h-3.5 text-amber-500 dark:text-amber-400" />
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() =>
+                      document
+                        .getElementById("pr-checks-section")
+                        ?.scrollIntoView({ behavior: "smooth" })
+                    }
+                    className="group inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white dark:bg-slate-800/80 hover:bg-amber-50 dark:hover:bg-amber-500/10 border border-slate-200 dark:border-slate-700 hover:border-amber-500/40 text-slate-700 dark:text-slate-300 hover:text-amber-600 dark:hover:text-amber-400 text-xs font-medium transition-all duration-200 shadow-xs hover:shadow-sm hover:-translate-y-0.5 cursor-pointer"
+                    title="Click to view Pull Request checks"
+                  >
+                    <Terminal className="w-3.5 h-3.5 text-amber-500 transition-transform group-hover:scale-110" />
                     <span>PR Checks</span>
-                  </span>
+                  </button>
                 </div>
               </div>
 
-              {/* Right Column: Platform Metrics */}
-              <div className="flex flex-col sm:flex-row lg:flex-col gap-3 self-stretch lg:self-center min-w-[240px]">
-                {/* Infraxis Agents Stat Card */}
-                <div className="p-3.5 rounded-xl bg-gradient-to-r from-slate-50 to-white dark:from-slate-950/80 dark:to-slate-900/40 border border-slate-200 dark:border-slate-800/80 flex items-center justify-between gap-4">
+              {/* Interactive Workflow Badges */}
+            </div>
+
+            {/* Row 2: Telemetry Metrics Row (Full Width 3-Column Grid) */}
+            <div className="relative z-10 grid grid-cols-1 md:grid-cols-3 gap-4 pt-5 border-t border-slate-200/70 dark:border-slate-800/70">
+              {/* Card 1: Infraxis Agents */}
+              <div className="relative group p-4 rounded-2xl bg-white/80 dark:bg-slate-900/80 border border-slate-200/90 dark:border-slate-800/90 hover:border-emerald-500/40 dark:hover:border-emerald-500/40 transition-all duration-200 shadow-xs hover:shadow-md hover:shadow-emerald-500/5 backdrop-blur-sm">
+                <div className="flex items-center justify-between gap-3">
                   <div className="flex items-center gap-3">
-                    <div className="w-8 h-8 rounded-lg bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 flex items-center justify-center shrink-0">
-                      <Cpu className="w-4 h-4" />
+                    <div className="w-10 h-10 rounded-xl bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 flex items-center justify-center shrink-0 group-hover:scale-105 transition-transform">
+                      <Cpu className="w-5 h-5" />
                     </div>
                     <div>
-                      <span className="block text-[10px] uppercase font-mono tracking-wider text-slate-500 dark:text-slate-400 font-semibold">
+                      <span className="block text-[10px] uppercase font-mono tracking-wider text-slate-500 dark:text-slate-400 font-bold">
                         Infraxis Agents
                       </span>
-                      <span className="text-xs font-bold text-slate-900 dark:text-slate-100 flex items-center gap-1.5">
-                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                        {workers.filter((w) => w.online).length} Online
-                      </span>
+                      <div className="flex items-baseline gap-2 mt-0.5">
+                        <span className="text-2xl font-black text-slate-900 dark:text-white font-mono tracking-tight">
+                          {onlineWorkersCount}
+                        </span>
+                        <span className="text-xs font-bold text-emerald-600 dark:text-emerald-400 flex items-center gap-1">
+                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                          Online
+                        </span>
+                      </div>
                     </div>
                   </div>
-                  <span className="text-[11px] font-mono text-slate-400">
+                  <span className="text-[11px] font-mono px-2 py-0.5 rounded-md bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 border border-slate-200 dark:border-slate-700/60">
                     {workers.length} registered
                   </span>
                 </div>
-
-                {/* Total Builds Stat Card */}
-                <div className="p-3.5 rounded-xl bg-gradient-to-r from-slate-50 to-white dark:from-slate-950/80 dark:to-slate-900/40 border border-slate-200 dark:border-slate-800/80 flex items-center justify-between gap-4">
-                  <div className="flex items-center gap-3">
-                    <div className="w-8 h-8 rounded-lg bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/20 flex items-center justify-center shrink-0">
-                      <Layers className="w-4 h-4" />
-                    </div>
-                    <div>
-                      <span className="block text-[10px] uppercase font-mono tracking-wider text-slate-500 dark:text-slate-400 font-semibold">
-                        Total Builds
-                      </span>
-                      <span className="text-xs font-bold text-slate-900 dark:text-slate-100">
-                        {jobs.length} Runs
-                      </span>
-                    </div>
-                  </div>
-                  <span className="text-[11px] font-mono text-slate-400">
-                    {jobs.filter((j) => ["queued", "running", "claimed"].includes(j.status)).length} active
-                  </span>
+                {/* Micro capacity bar */}
+                <div className="mt-3 w-full bg-slate-100 dark:bg-slate-800/80 rounded-full h-1.5 overflow-hidden">
+                  <div
+                    className="bg-emerald-500 h-1.5 rounded-full transition-all duration-500"
+                    style={{
+                      width:
+                        workers.length > 0
+                          ? `${Math.min(
+                              100,
+                              Math.round(
+                                (onlineWorkersCount / workers.length) * 100,
+                              ),
+                            )}%`
+                          : "0%",
+                    }}
+                  />
                 </div>
               </div>
+
+              {/* Card 2: Total Builds */}
+              <button
+                type="button"
+                onClick={() =>
+                  document
+                    .getElementById("recent-builds-section")
+                    ?.scrollIntoView({ behavior: "smooth" })
+                }
+                className="relative group p-4 rounded-2xl bg-white/80 dark:bg-slate-900/80 border border-slate-200/90 dark:border-slate-800/90 hover:border-blue-500/40 dark:hover:border-blue-500/40 transition-all duration-200 shadow-xs hover:shadow-md hover:shadow-blue-500/5 backdrop-blur-sm text-left cursor-pointer w-full"
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-3">
+                    <div className="w-10 h-10 rounded-xl bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/20 flex items-center justify-center shrink-0 group-hover:scale-105 transition-transform">
+                      <Layers className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <span className="block text-[10px] uppercase font-mono tracking-wider text-slate-500 dark:text-slate-400 font-bold">
+                        Total Builds
+                      </span>
+                      <div className="flex items-baseline gap-2 mt-0.5">
+                        <span className="text-2xl font-black text-slate-900 dark:text-white font-mono tracking-tight">
+                          {jobs.length}
+                        </span>
+                        <span className="text-xs font-bold text-blue-600 dark:text-blue-400">
+                          Runs
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <span
+                      className={`text-[11px] font-mono px-2 py-0.5 rounded-md border ${
+                        activeJobsCount > 0
+                          ? "bg-blue-500/10 text-blue-600 dark:text-blue-400 border-blue-500/30 animate-pulse"
+                          : "bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 border-slate-200 dark:border-slate-700/60"
+                      }`}
+                    >
+                      {activeJobsCount} active
+                    </span>
+                    <ArrowUpRight className="w-3.5 h-3.5 text-blue-500 opacity-0 group-hover:opacity-100 transition-opacity" />
+                  </div>
+                </div>
+                {/* Micro activity bar */}
+                <div className="mt-3 w-full bg-slate-100 dark:bg-slate-800/80 rounded-full h-1.5 overflow-hidden">
+                  <div
+                    className="bg-blue-500 h-1.5 rounded-full transition-all duration-500"
+                    style={{
+                      width:
+                        jobs.length > 0
+                          ? `${Math.min(
+                              100,
+                              Math.max(
+                                15,
+                                Math.round(
+                                  ((jobs.length - activeJobsCount) /
+                                    jobs.length) *
+                                    100,
+                                ),
+                              ),
+                            )}%`
+                          : "0%",
+                    }}
+                  />
+                </div>
+              </button>
+
+              {/* Card 3: PR Checks */}
+              <button
+                type="button"
+                onClick={() =>
+                  document
+                    .getElementById("pr-checks-section")
+                    ?.scrollIntoView({ behavior: "smooth" })
+                }
+                className="relative group p-4 rounded-2xl bg-white/80 dark:bg-slate-900/80 border border-slate-200/90 dark:border-slate-800/90 hover:border-purple-500/40 dark:hover:border-purple-500/40 transition-all duration-200 shadow-xs hover:shadow-md hover:shadow-purple-500/5 backdrop-blur-sm text-left cursor-pointer w-full"
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-3">
+                    <div className="w-10 h-10 rounded-xl bg-purple-500/10 text-purple-600 dark:text-purple-400 border border-purple-500/20 flex items-center justify-center shrink-0 group-hover:scale-105 transition-transform">
+                      <GitPullRequest className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <span className="block text-[10px] uppercase font-mono tracking-wider text-slate-500 dark:text-slate-400 font-bold">
+                        PR Checks
+                      </span>
+                      <div className="flex items-baseline gap-2 mt-0.5">
+                        <span className="text-2xl font-black text-slate-900 dark:text-white font-mono tracking-tight">
+                          {pullRequests.length}
+                        </span>
+                        <span className="text-xs font-bold text-purple-600 dark:text-purple-400">
+                          Tracked
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <span
+                      className={`text-[11px] font-mono px-2 py-0.5 rounded-md border ${
+                        pendingPrCount > 0
+                          ? "bg-purple-500/10 text-purple-600 dark:text-purple-400 border-purple-500/30"
+                          : "bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 border-slate-200 dark:border-slate-700/60"
+                      }`}
+                    >
+                      {pendingPrCount} pending
+                    </span>
+                    <ArrowUpRight className="w-3.5 h-3.5 text-purple-500 opacity-0 group-hover:opacity-100 transition-opacity" />
+                  </div>
+                </div>
+                {/* Micro activity bar */}
+                <div className="mt-3 w-full bg-slate-100 dark:bg-slate-800/80 rounded-full h-1.5 overflow-hidden">
+                  <div
+                    className="bg-purple-500 h-1.5 rounded-full transition-all duration-500"
+                    style={{
+                      width:
+                        pullRequests.length > 0
+                          ? `${Math.min(
+                              100,
+                              Math.max(
+                                20,
+                                Math.round(
+                                  ((pullRequests.length - pendingPrCount) /
+                                    pullRequests.length) *
+                                    100,
+                                ),
+                              ),
+                            )}%`
+                          : "100%",
+                    }}
+                  />
+                </div>
+              </button>
             </div>
           </section>
 
+          {/* Git Repositories & Integrations Hub */}
+          <section id="git-integrations-section">
+            <GitIntegrationsHub
+              token={token}
+              recentJobs={jobs}
+              onViewJobLogs={handleSelectJob}
+            />
+          </section>
+
           {/* Queue Build Form */}
-          <section>
+          <section id="queue-build-section">
             <QueueBuildForm onBuildQueued={handleBuildQueued} token={token} />
           </section>
 
@@ -502,8 +755,18 @@ export default function DashboardPage() {
             </section>
           )}
 
+          {/* Pull Requests & PR Checks Table */}
+          <section id="pr-checks-section">
+            <PullRequestsTable
+              pullRequests={pullRequests}
+              onSelectJob={handleSelectJob}
+              onRefresh={handleRefresh}
+              isLoading={isLoadingJobs}
+            />
+          </section>
+
           {/* Build Artifacts Table (Outside Terminal) */}
-          <section>
+          <section id="artifacts-section">
             <BuildArtifactsTable
               token={token}
               selectedJobId={selectedJobId}
@@ -512,7 +775,7 @@ export default function DashboardPage() {
           </section>
 
           {/* Recent Builds Table */}
-          <section>
+          <section id="recent-builds-section">
             <RecentBuildsTable
               jobs={jobs}
               selectedJobId={selectedJobId}

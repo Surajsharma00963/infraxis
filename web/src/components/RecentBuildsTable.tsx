@@ -17,6 +17,7 @@ import {
   CheckCircle2,
   XCircle,
   AlertTriangle,
+  GitPullRequest,
 } from "lucide-react";
 import { Job, JobStatus } from "../types/ci";
 import { timeAgo, isLocalUrl } from "../lib/api";
@@ -356,10 +357,21 @@ export default function RecentBuildsTable({
                     </td>
 
                     <td className="py-3.5 px-4 whitespace-nowrap">
-                      <div className="flex items-center gap-1.5">
+                      <div className="flex flex-wrap items-center gap-1.5">
                         <span className="font-mono text-[11px] px-2 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700 font-medium">
                           {j.kind}
                         </span>
+                        {j.pr_number && (
+                          <span className="inline-flex items-center gap-1 font-mono text-[10px] px-1.5 py-0.5 rounded bg-purple-500/10 text-purple-700 dark:text-purple-300 border border-purple-500/20 font-semibold">
+                            <GitPullRequest className="w-3 h-3 text-purple-500" />
+                            PR #{j.pr_number}
+                          </span>
+                        )}
+                        {j.target_app && (
+                          <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-sky-500/10 text-sky-700 dark:text-sky-300 border border-sky-500/20">
+                            {j.target_app}
+                          </span>
+                        )}
                         {j.package_manager && j.package_manager !== "auto" && (
                           <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-indigo-500/10 dark:bg-indigo-500/15 text-indigo-700 dark:text-indigo-300 border border-indigo-500/20 dark:border-indigo-500/30">
                             {j.package_manager}
