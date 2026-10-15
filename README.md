@@ -305,7 +305,32 @@ Test coverage includes:
 
 ---
 
-## 10. Troubleshooting
+## 10. GitHub & Bitbucket Repository Integrations
+
+Infraxis supports full repository lifecycle integration with GitHub and Bitbucket Cloud.
+
+### 1. Account Authentication
+- **OAuth 2.0**: Connect user or organization accounts via standard OAuth flows.
+  - **GitHub Callback URL**: `http://localhost:8787/api/integrations/oauth/github/callback`
+  - **Bitbucket Callback URL**: `http://localhost:8787/api/integrations/oauth/bitbucket/callback`
+- **Personal Access Tokens (PAT)**: Scoped access tokens can be connected directly from the UI or via API.
+- **AES-256-GCM Encryption**: All access and refresh tokens are encrypted at rest on the backend and are never exposed to the frontend console.
+
+### 2. Repository Discovery & Remote Inspection
+- Discovers private and public repositories with pagination and real-time search.
+- Reads repository trees and manifests (`package.json`, `pubspec.yaml`, `build.gradle`, `Podfile`, `Dockerfile`, `go.mod`, `pom.xml`, `infraxis.yml`) without executing untrusted code.
+- Automatically detects frameworks (Next.js, React Native, Expo, Flutter, Android, iOS, Docker, Go, Python, Java, Monorepos).
+- Extracts build/test scripts and provides recommended pipeline profiles.
+
+### 3. Build & PR Checks Integration
+- Choose branch, commit hash, and pipeline profile to trigger builds on demand.
+- Webhooks automatically trigger PR validation jobs on PR open and commit synchronization.
+- Real-time commit statuses (`pending`, `success`, `failure`) are published back to GitHub Statuses API and Bitbucket Commit Status API.
+- Secure Git Credential Injection: Workers query `/api/jobs/:id/git-credentials` over authenticated channels to inject short-lived Git HTTP authorization headers without saving passwords to disk or embedding them in URLs.
+
+---
+
+## 11. Troubleshooting
 
 ### 1. Database Connection Errors (`ECONNREFUSED 127.0.0.1:5432`)
 - Check PostgreSQL service status: `pg_isready -h 127.0.0.1 -p 5432`.

@@ -82,6 +82,97 @@ fs.mkdirSync(WORK_DIR, { recursive: true });
   process.env.PATH = curPaths.join(path.delimiter);
 }
 
+function probeCli(command, args = ["--version"]) {
+  try {
+    const { execFileSync } = require("child_process");
+    const out = execFileSync(command, args, {
+      encoding: "utf8",
+      timeout: 3000,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    return out.trim().split("\n")[0];
+  } catch {
+    return null;
+  }
+}
+
+function detectWorkerCapabilities() {
+  const capabilities = {
+    node: true,
+    git: Boolean(probeCli("git", ["--version"])),
+    npm: Boolean(probeCli("npm", ["--version"])),
+    pnpm: Boolean(probeCli("pnpm", ["--version"])),
+    yarn: Boolean(probeCli("yarn", ["--version"])),
+    python: Boolean(
+      probeCli("python3", ["--version"]) || probeCli("python", ["--version"]),
+    ),
+    go: Boolean(probeCli("go", ["version"])),
+    rust: Boolean(probeCli("rustc", ["--version"])),
+    java: Boolean(
+      probeCli("javac", ["-version"]) || probeCli("java", ["-version"]),
+    ),
+    docker: Boolean(probeCli("docker", ["--version"])),
+    flutter: Boolean(probeCli("flutter", ["--version"])),
+    dotnet: Boolean(probeCli("dotnet", ["--version"])),
+    php: Boolean(probeCli("php", ["--version"])),
+    android: Boolean(
+      process.env.ANDROID_HOME ||
+        process.env.ANDROID_SDK_ROOT ||
+        fs.existsSync(path.join(process.env.HOME || "", "Library/Android/sdk")) ||
+        fs.existsSync("/usr/lib/android-sdk"),
+    ),
+    ios:
+      process.platform === "darwin" &&
+      Boolean(probeCli("xcodebuild", ["-version"])),
+    xcode:
+      process.platform === "darwin" &&
+      Boolean(probeCli("xcodebuild", ["-version"])),
+  };
+
+  const detectedLabels = [...LABELS];
+  for (const [k, v] of Object.entries(capabilities)) {
+    if (v && !detectedLabels.includes(k)) {
+      detectedLabels.push(k);
+    }
+  }
+  if (!detectedLabels.includes(process.platform)) {
+    detectedLabels.push(process.platform);
+  }
+  if (!detectedLabels.includes(process.arch)) {
+    detectedLabels.push(process.arch);
+  }
+
+  const runtimes = {
+    node: process.version,
+    python: probeCli("python3") || probeCli("python"),
+    go: probeCli("go", ["version"]),
+    rust: probeCli("rustc"),
+    java: probeCli("javac", ["-version"]),
+    docker: probeCli("docker"),
+    flutter: probeCli("flutter", ["--version"]),
+    xcode:
+      process.platform === "darwin"
+        ? probeCli("xcodebuild", ["-version"])
+        : null,
+  };
+
+  const system_info = {
+    hostname: os.hostname(),
+    platform: process.platform,
+    arch: process.arch,
+    release: os.release(),
+    cpus: os.cpus().length,
+    cpuModel: os.cpus()[0]?.model || "Unknown",
+    totalMemMb: Math.round(os.totalmem() / (1024 * 1024)),
+    freeMemMb: Math.round(os.freemem() / (1024 * 1024)),
+    runtimes,
+  };
+
+  return { capabilities, labels: detectedLabels, system_info };
+}
+
+const hostInfo = detectWorkerCapabilities();
+
 async function api(route, options = {}) {
   const response = await fetch(`${BASE_URL.replace(/\/$/, "")}${route}`, {
     ...options,
@@ -283,7 +374,12 @@ async function runStep(job, cwd, cmd, args, env = {}, options = {}) {
   if (currentJobContext?.cancelled) {
     throw new Error(currentJobContext.cancelReason || "Job was cancelled");
   }
-  await log(job, `$ ${cmd} ${args.join(" ")}`, "system");
+  const sanitizedArgs = args.map((a) =>
+    typeof a === "string" && a.startsWith("http.extraHeader=")
+      ? "http.extraHeader=[REDACTED]"
+      : a,
+  );
+  await log(job, `$ ${cmd} ${sanitizedArgs.join(" ")}`, "system");
   const result = await run(
     cmd,
     args,
@@ -301,6 +397,110 @@ async function runStep(job, cwd, cmd, args, env = {}, options = {}) {
   if (result.code !== 0)
     throw new Error(`${cmd} exited with code ${result.code}`);
 }
+
+async function runShellStep(job, cwd, fullCommand, env = {}) {
+  if (currentJobContext?.cancelled) {
+    throw new Error(currentJobContext.cancelReason || "Job was cancelled");
+  }
+
+  // Security check: Disallow dangerous system destructive commands
+  const dangerousPatterns = [
+    /rm\s+-rf\s+\/(?:\s|$)/,
+    /mkfs/,
+    /dd\s+if=/,
+    /:(){ :|:& };:/,
+  ];
+  for (const pat of dangerousPatterns) {
+    if (pat.test(fullCommand)) {
+      throw new Error(`Command rejected for security reasons: dangerous command pattern detected`);
+    }
+  }
+
+  await log(job, `$ ${fullCommand}`, "system");
+
+  // Protect administrator secrets: Never pass worker token or database credentials to build commands
+  const safeEnv = {
+    ...process.env,
+    CI: "true",
+    INFRAXIS: "true",
+    INFRAXIS_JOB_ID: job.id,
+    ...env,
+  };
+  delete safeEnv.INFRAXIS_WORKER_TOKEN;
+  delete safeEnv.CI_WORKER_TOKEN;
+  delete safeEnv.POSTGRES_PASSWORD;
+  delete safeEnv.DATABASE_URL;
+
+  const isWin = process.platform === "win32";
+  const shell = isWin ? "cmd.exe" : "/bin/sh";
+  const shellArgs = isWin ? ["/d", "/s", "/c", fullCommand] : ["-c", fullCommand];
+
+  const result = await run(
+    shell,
+    shellArgs,
+    cwd,
+    safeEnv,
+    (line, stream) => {
+      queueLog(job.id, line, stream);
+    },
+  );
+
+  await flushLogs();
+  if (currentJobContext?.cancelled) {
+    throw new Error(currentJobContext.cancelReason || "Job was cancelled");
+  }
+  if (result.error) await log(job, result.error, "stderr");
+  if (result.code !== 0) {
+    throw new Error(`Stage command exited with code ${result.code}`);
+  }
+}
+
+async function collectAndUploadArtifacts(job, srcDir, artifactGlobs = []) {
+  if (!Array.isArray(artifactGlobs) || artifactGlobs.length === 0) return;
+
+  function walk(currentDir) {
+    let files = [];
+    try {
+      const entries = fs.readdirSync(currentDir, { withFileTypes: true });
+      for (const e of entries) {
+        if (e.name === "node_modules" || e.name === ".git") continue;
+        const full = path.join(currentDir, e.name);
+        if (e.isDirectory()) {
+          files = files.concat(walk(full));
+        } else if (e.isFile()) {
+          files.push(full);
+        }
+      }
+    } catch {}
+    return files;
+  }
+
+  const allFiles = walk(srcDir);
+  let uploadedCount = 0;
+
+  for (const globPattern of artifactGlobs) {
+    const cleanPattern = globPattern.replace(/\*\*/g, ".*").replace(/\*/g, "[^/]*");
+    const regex = new RegExp(cleanPattern.replace(/\./g, "\\."));
+
+    for (const f of allFiles) {
+      const rel = path.relative(srcDir, f);
+      if (regex.test(rel) || rel.endsWith(globPattern)) {
+        try {
+          const stat = fs.statSync(f);
+          if (stat.size <= 500 * 1024 * 1024) {
+            await uploadFile(job, f);
+            uploadedCount++;
+          }
+        } catch {}
+      }
+    }
+  }
+
+  if (uploadedCount > 0) {
+    await log(job, `[Infraxis] Uploaded ${uploadedCount} artifact(s) successfully.`, "system");
+  }
+}
+
 function workspace(job) {
   const dir = path.join(WORK_DIR, job.id);
   fs.mkdirSync(dir, { recursive: true });
@@ -322,14 +522,30 @@ async function checkout(job, dir) {
     } catch {}
   }
 
+  let gitArgsPrefix = [];
+  if (!isLocal) {
+    try {
+      const credRes = await fetch(`${BASE_URL}/api/jobs/${encodeURIComponent(job.id)}/git-credentials`, {
+        headers: { Authorization: `Bearer ${TOKEN}` },
+      });
+      if (credRes.ok) {
+        const credData = await credRes.json();
+        if (credData?.header) {
+          gitArgsPrefix = ["-c", `http.extraHeader=${credData.header}`];
+        }
+      }
+    } catch {}
+  }
+
   const cloneArgs = isLocal
     ? ["clone", "--no-checkout", cloneUrl, "src"]
-    : ["clone", "--no-checkout", "--depth", "50", cloneUrl, "src"];
+    : [...gitArgsPrefix, "clone", "--no-checkout", "--depth", "50", cloneUrl, "src"];
   await runStep(job, dir, "git", cloneArgs);
 
   if (!isLocal || commitHash.toUpperCase() !== "HEAD") {
     try {
       await runStep(job, src, "git", [
+        ...gitArgsPrefix,
         "fetch",
         "--depth",
         "1",
@@ -1096,123 +1312,159 @@ ${devTeam ? `    <key>teamID</key>\n    <string>${devTeam}</string>\n` : ""}    
           "No Release archive or IPA was generated in build/ios/",
         );
       }
-    } else if (job.kind === "pr-checks") {
-      let pkgScripts = {};
+    } else if (
+      [
+        "pr-checks",
+        "dev-build",
+        "release-build",
+        "custom-pipeline",
+      ].includes(job.kind) ||
+      job.metadata?.pipeline
+    ) {
+      // 1. Detect project characteristics
+      let detection = null;
       try {
-        pkgScripts =
-          JSON.parse(fs.readFileSync(path.join(src, "package.json"), "utf8"))
-            .scripts || {};
+        const { detectRepository } = require("../server/services/detector");
+        detection = detectRepository(src);
+        await log(
+          job,
+          `[Infraxis Detection] Detected project type: ${detection.primaryType.toUpperCase()} (${detection.category}) · Technologies: ${detection.technologies.join(", ") || "generic"}`,
+          "system",
+        );
+      } catch (err) {
+        await log(job, `[Infraxis Detection Notice] ${err.message}`, "system");
+      }
+
+      // 2. Load repo config if exists
+      let customConfig = null;
+      try {
+        const { loadRepoConfig } = require("../server/services/config-parser");
+        customConfig = loadRepoConfig(src);
+        if (customConfig) {
+          await log(job, `[Infraxis Config] Loaded project config (infraxis.yml)`, "system");
+        }
       } catch {}
 
-      const jobMeta = job.metadata || {};
-      const strictLint =
-        jobMeta.strictLint === true || process.env.CI_STRICT_LINT === "true";
-      const checkResults = [];
+      // 3. Plan pipeline stages
+      let pipeline = job.metadata?.pipeline;
+      if (!pipeline) {
+        const { planPipeline } = require("../server/services/pipeline");
+        pipeline = planPipeline({
+          detection,
+          profile: job.kind,
+          customConfig,
+          options: job.metadata || {},
+        });
+      }
 
-      // 1. Code Quality & Linting
-      if (pkgScripts.lint) {
-        await log(job, "Running Code Quality & Lint Check (lint)...", "system");
+      await log(
+        job,
+        `[Infraxis Pipeline] Planned ${pipeline.stages.length} stage(s) for ${pipeline.name}`,
+        "system",
+      );
+
+      const checkResults = [];
+      for (let idx = 0; idx < pipeline.stages.length; idx++) {
+        const stage = pipeline.stages[idx];
+        const stageDir = path.resolve(src, stage.dir || ".");
+        const stageStart = Date.now();
+
+        await log(
+          job,
+          `\n════ Stage ${idx + 1}/${pipeline.stages.length}: ${stage.name} [${stage.category}] ════`,
+          "system",
+        );
+
+        // Notify server that stage has started
+        api(`/api/jobs/${job.id}/stages`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name: stage.name,
+            category: stage.category,
+            status: "running",
+            started_at: new Date(stageStart).toISOString(),
+          }),
+        }).catch(() => {});
+
         try {
-          await runStep(job, src, pm.cmd, pm.runArgs("lint"));
+          await runShellStep(job, stageDir, stage.command, stage.env);
+          const duration = Date.now() - stageStart;
           checkResults.push({
-            name: "Lint Check",
+            name: stage.name,
+            category: stage.category,
             status: "PASSED",
             icon: "✅",
+            duration_ms: duration,
           });
-        } catch (lintErr) {
-          if (strictLint) {
+
+          api(`/api/jobs/${job.id}/stages`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              name: stage.name,
+              category: stage.category,
+              status: "passed",
+              duration_ms: duration,
+              finished_at: new Date().toISOString(),
+            }),
+          }).catch(() => {});
+        } catch (stageErr) {
+          const duration = Date.now() - stageStart;
+          if (stage.allowFailure) {
             checkResults.push({
-              name: "Lint Check",
-              status: "FAILED",
-              icon: "❌",
-            });
-            throw new Error(
-              `Lint check failed in strict mode: ${lintErr.message}`,
-            );
-          } else {
-            checkResults.push({
-              name: "Lint Check",
+              name: stage.name,
+              category: stage.category,
               status: "WARNING (Non-blocking)",
               icon: "⚠️",
+              duration_ms: duration,
             });
             await log(
               job,
-              `[Infraxis Agent] ⚠️ Lint check completed with issues. Non-blocking mode active: continuing PR verification...`,
+              `⚠️ [${stage.name}] Completed with warnings (non-blocking). Continuing pipeline...`,
               "system",
             );
+            api(`/api/jobs/${job.id}/stages`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                name: stage.name,
+                category: stage.category,
+                status: "passed",
+                duration_ms: duration,
+                output: stageErr.message,
+                finished_at: new Date().toISOString(),
+              }),
+            }).catch(() => {});
+          } else {
+            checkResults.push({
+              name: stage.name,
+              category: stage.category,
+              status: "FAILED",
+              icon: "❌",
+              duration_ms: duration,
+            });
+            api(`/api/jobs/${job.id}/stages`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                name: stage.name,
+                category: stage.category,
+                status: "failed",
+                duration_ms: duration,
+                output: stageErr.message,
+                finished_at: new Date().toISOString(),
+              }),
+            }).catch(() => {});
+            throw stageErr;
           }
         }
       }
 
-      // 2. TypeScript Check
-      if (pkgScripts.typecheck) {
-        await log(job, "Running TypeScript Check (typecheck)...", "system");
-        try {
-          await runStep(job, src, pm.cmd, pm.runArgs("typecheck"));
-          checkResults.push({
-            name: "TypeScript Check",
-            status: "PASSED",
-            icon: "✅",
-          });
-        } catch (tcErr) {
-          checkResults.push({
-            name: "TypeScript Check",
-            status: "FAILED",
-            icon: "❌",
-          });
-          throw tcErr;
-        }
-      }
-
-      // 3. Automated Tests
-      const testScript = pkgScripts["test:ci"]
-        ? "test:ci"
-        : pkgScripts.test
-          ? "test"
-          : null;
-      if (testScript) {
-        await log(job, `Running Automated Tests (${testScript})...`, "system");
-        try {
-          await runStep(job, src, pm.cmd, pm.runArgs(testScript));
-          checkResults.push({
-            name: "Automated Tests",
-            status: "PASSED",
-            icon: "✅",
-          });
-        } catch (testErr) {
-          checkResults.push({
-            name: "Automated Tests",
-            status: "FAILED",
-            icon: "❌",
-          });
-          throw testErr;
-        }
-      }
-
-      // 4. Android Build Verification
-      if (LABELS.includes("android") && fs.existsSync(androidDir)) {
-        await log(
-          job,
-          "Verifying Android Compilation (./gradlew assembleRelease)...",
-          "system",
-        );
-        try {
-          await runStep(job, androidDir, "./gradlew", ["assembleRelease"], {
-            CI: "true",
-          });
-          checkResults.push({
-            name: "Android Native Compilation",
-            status: "PASSED",
-            icon: "✅",
-          });
-        } catch (androidErr) {
-          checkResults.push({
-            name: "Android Native Compilation",
-            status: "FAILED",
-            icon: "❌",
-          });
-          throw androidErr;
-        }
+      // Collect artifacts if defined in pipeline
+      if (Array.isArray(pipeline.artifacts) && pipeline.artifacts.length > 0) {
+        await log(job, "[Infraxis] Collecting and uploading build artifacts...", "system");
+        await collectAndUploadArtifacts(job, src, pipeline.artifacts);
       }
 
       // Final Verification Summary
@@ -1221,15 +1473,23 @@ ${devTeam ? `    <key>teamID</key>\n    <string>${devTeam}</string>\n` : ""}    
         "═══════════════════════════════════════════════════════════",
         "system",
       );
-      await log(job, "Infraxis PR Verification Report:", "system");
+      await log(job, `Infraxis ${pipeline.name} Report:`, "system");
       for (const r of checkResults) {
-        await log(job, `  ${r.icon} ${r.name}: ${r.status}`, "system");
+        await log(
+          job,
+          `  ${r.icon} ${r.name}: ${r.status} (${(r.duration_ms / 1000).toFixed(1)}s)`,
+          "system",
+        );
       }
       await log(
         job,
         "═══════════════════════════════════════════════════════════",
         "system",
       );
+
+      if (currentJobContext) {
+        currentJobContext.checkResults = checkResults;
+      }
     } else {
       throw new Error(`Unsupported job kind: ${job.kind}`);
     }
@@ -1244,6 +1504,7 @@ ${devTeam ? `    <key>teamID</key>\n    <string>${devTeam}</string>\n` : ""}    
     const wasCancelled = currentJobContext?.cancelled;
     const cancelReason =
       currentJobContext?.cancelReason || "Cancelled by administrator";
+    const jobCheckResults = currentJobContext?.checkResults || [];
     currentJobContext = null;
 
     if (wasCancelled) {
@@ -1278,7 +1539,11 @@ ${devTeam ? `    <key>teamID</key>\n    <string>${devTeam}</string>\n` : ""}    
         await api(`/api/jobs/${job.id}/finish`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ exit_code: exitCode, error }),
+          body: JSON.stringify({
+            exit_code: exitCode,
+            error,
+            check_results: jobCheckResults,
+          }),
         });
       }
     } catch (e) {
@@ -1341,9 +1606,12 @@ function ensureHeartbeatLoop() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           id: WORKER_ID,
-          labels: LABELS,
+          labels: hostInfo.labels,
           current_job: currentJobContext?.id || null,
           platform: process.platform,
+          arch: process.arch,
+          capabilities: hostInfo.capabilities,
+          system_info: hostInfo.system_info,
           version: "0.2.0",
         }),
       });
@@ -1358,7 +1626,7 @@ function ensureHeartbeatLoop() {
 
 async function main() {
   console.log(
-    `[Infraxis Agent] Worker ${WORKER_ID} online (${process.platform}); labels=${LABELS.join(",")}`,
+    `[Infraxis Agent] Worker ${WORKER_ID} online (${process.platform}-${process.arch}); labels=${hostInfo.labels.join(",")}`,
   );
   ensureHeartbeatLoop();
 
@@ -1367,7 +1635,13 @@ async function main() {
       const result = await api("/api/workers/claim", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id: WORKER_ID, labels: LABELS }),
+        body: JSON.stringify({
+          id: WORKER_ID,
+          labels: hostInfo.labels,
+          capabilities: hostInfo.capabilities,
+          platform: process.platform,
+          arch: process.arch,
+        }),
       });
       if (result.job) await execute(result.job);
       else await waitForNextPoll();
@@ -1381,3 +1655,4 @@ main().catch((e) => {
   console.error(e);
   process.exit(1);
 });
+

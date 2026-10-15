@@ -13,6 +13,17 @@ const Redis = require("ioredis");
 // Infraxis Core PostgreSQL Database Layer
 const db = require("./db");
 
+// Universal CI/CD Services
+const { detectRepository } = require("./services/detector");
+const {
+  planPipeline,
+  getRecommendedProfileAndTarget,
+  detectBuildKind,
+} = require("./services/pipeline");
+const { loadRepoConfig } = require("./services/config-parser");
+const { reportCommitStatus } = require("./services/status-reporter");
+const integrationsRouter = require("./routes/integrations");
+
 const app = express();
 const server = http.createServer(app);
 app.disable("x-powered-by");
@@ -277,6 +288,10 @@ async function requireAdmin(req, res, next) {
   if (!(await isValidAdminToken(token))) {
     return res.status(401).json({ error: "Unauthorized" });
   }
+  try {
+    const user = await db.auth.findUserByToken(token);
+    if (user) req.user = user;
+  } catch {}
   next();
 }
 
@@ -305,6 +320,32 @@ function isLocalCloneUrl(s) {
     t.startsWith("../") ||
     t.startsWith("~")
   );
+}
+
+function parseGitUrl(rawUrl) {
+  if (!rawUrl || typeof rawUrl !== "string") return null;
+  const clean = rawUrl.trim().replace(/\.git$/, "");
+  if (isLocalCloneUrl(clean)) return null;
+
+  let provider = null;
+  if (clean.includes("github.com")) {
+    provider = "github";
+  } else if (clean.includes("bitbucket.org")) {
+    provider = "bitbucket";
+  }
+
+  const match = clean.match(/(?:[:/]|^)([^/:]+)\/([^/:]+)$/);
+  if (match) {
+    const owner = match[1];
+    const repo = match[2];
+    return {
+      provider: provider || "github",
+      owner,
+      repo,
+      fullName: `${owner}/${repo}`,
+    };
+  }
+  return null;
 }
 
 function validCommit(s, isLocal = false) {
@@ -501,6 +542,13 @@ async function broadcastWorkers() {
   } catch {}
 }
 
+async function broadcastPullRequests() {
+  try {
+    const prsList = await db.pullRequests.listPullRequests(50);
+    wsBroadcast({ type: "pull_requests", pullRequests: prsList });
+  } catch {}
+}
+
 function broadcastJobLogs(jobId, logs) {
   const str = JSON.stringify({ type: "job_logs", jobId, logs });
   for (const client of wsClients) {
@@ -525,15 +573,17 @@ wss.on("connection", async (ws, req) => {
   if (isAuth) {
     wsClients.add(ws);
     try {
-      const [jobsList, workersList] = await Promise.all([
+      const [jobsList, workersList, prsList] = await Promise.all([
         db.jobs.listJobs(100),
         db.workers.listWorkers(30000),
+        db.pullRequests.listPullRequests(50),
       ]);
       ws.send(
         JSON.stringify({
           type: "init",
           jobs: jobsList,
           workers: workersList,
+          pullRequests: prsList,
         }),
       );
     } catch {}
@@ -546,15 +596,17 @@ wss.on("connection", async (ws, req) => {
         if (msg.token && (await isValidAdminToken(msg.token))) {
           isAuth = true;
           wsClients.add(ws);
-          const [jobsList, workersList] = await Promise.all([
+          const [jobsList, workersList, prsList] = await Promise.all([
             db.jobs.listJobs(100),
             db.workers.listWorkers(30000),
+            db.pullRequests.listPullRequests(50),
           ]);
           ws.send(
             JSON.stringify({
               type: "init",
               jobs: jobsList,
               workers: workersList,
+              pullRequests: prsList,
             }),
           );
         } else {
@@ -573,15 +625,17 @@ wss.on("connection", async (ws, req) => {
       }
 
       if (msg.type === "get_state") {
-        const [jobsList, workersList] = await Promise.all([
+        const [jobsList, workersList, prsList] = await Promise.all([
           db.jobs.listJobs(100),
           db.workers.listWorkers(30000),
+          db.pullRequests.listPullRequests(50),
         ]);
         ws.send(
           JSON.stringify({
             type: "snapshot",
             jobs: jobsList,
             workers: workersList,
+            pullRequests: prsList,
           }),
         );
       } else if (msg.type === "subscribe_job" && msg.jobId) {
@@ -1182,10 +1236,91 @@ app.get("/api/auth/me", async (req, res) => {
   res.json({ ok: true, user });
 });
 
-// Git repository local inspector
-app.get("/api/inspect-local", (req, res) => {
+// Git repository local & remote inspector
+app.get("/api/inspect-local", async (req, res) => {
   const raw = (req.query.path || "").trim();
   if (!raw) return res.status(400).json({ error: "Missing path parameter" });
+
+  const parsedGit = parseGitUrl(raw);
+  if (parsedGit) {
+    try {
+      const { resolveAccountAndToken, getAdapter } = require("./services/git-providers");
+      const { token, adapter } = await resolveAccountAndToken({ provider: parsedGit.provider });
+      const { detectRemoteRepository } = require("./services/remote-detector");
+
+      let branch = "main";
+      let commitHash = "HEAD";
+      let commitMsg = "";
+
+      const activeAdapter = adapter || getAdapter(parsedGit.provider);
+      if (token) {
+        try {
+          const repoDetail = await activeAdapter.getRepository({ token, owner: parsedGit.owner, repo: parsedGit.repo });
+          if (repoDetail.defaultBranch) branch = repoDetail.defaultBranch;
+          const commitRes = await activeAdapter.listCommits({ token, owner: parsedGit.owner, repo: parsedGit.repo, branch, perPage: 1 });
+          if (commitRes.commits?.[0]) {
+            commitHash = commitRes.commits[0].hash;
+            commitMsg = commitRes.commits[0].message;
+          }
+        } catch {}
+      }
+
+      const detection = await detectRemoteRepository({
+        adapter: activeAdapter,
+        token,
+        owner: parsedGit.owner,
+        repo: parsedGit.repo,
+        ref: commitHash,
+      });
+
+      return res.json({
+        ok: true,
+        path: raw,
+        folderName: parsedGit.repo,
+        appName: detection.name || parsedGit.fullName,
+        branch,
+        commitHash,
+        commitMsg,
+        packageManager: detection.packageManager || "npm",
+        isGit: true,
+        primaryType: detection.primaryType,
+        category: detection.category,
+        technologies: detection.technologies,
+        requiredCapabilities: detection.requiredCapabilities,
+        isMonorepo: detection.isMonorepo,
+        monorepoType: detection.monorepoType,
+        subApps: detection.subApps,
+        hasInfraxisConfig: detection.hasInfraxisConfig,
+        hasDockerfile: detection.hasDockerfile,
+        recommendedProfile: detection.recommendedProfile,
+        pipelineTarget: detection.pipelineTarget,
+        availableProfiles: detection.availableProfiles,
+        detection,
+      });
+    } catch (remoteErr) {
+      console.warn(`[Remote Inspect Warning] ${raw}:`, remoteErr.message);
+      return res.json({
+        ok: true,
+        path: raw,
+        folderName: parsedGit.repo,
+        appName: parsedGit.fullName,
+        branch: "main",
+        commitHash: "HEAD",
+        commitMsg: "",
+        packageManager: "auto",
+        isGit: true,
+        primaryType: "general",
+        category: "general",
+        technologies: [],
+        requiredCapabilities: [],
+        isMonorepo: false,
+        subApps: [],
+        hasInfraxisConfig: false,
+        recommendedProfile: "pr-checks",
+      });
+    }
+  }
+
   let target = raw.replace(/^file:\/\//, "");
   if (target.startsWith("~")) {
     target = path.join(process.env.HOME || "", target.slice(1));
@@ -1283,17 +1418,316 @@ app.get("/api/inspect-local", (req, res) => {
     packageManager = "yarn";
   }
 
+  // Universal Project Detection & Pipeline Planning
+  let detection = null;
+  try {
+    detection = detectRepository(target);
+  } catch {}
+
+  const customConfig = loadRepoConfig(target);
+  const recommendation = getRecommendedProfileAndTarget(detection, customConfig);
+
+  const suggestedPipelines = {
+    "pr-checks": planPipeline({
+      detection,
+      profile: "pr-checks",
+      customConfig,
+    }),
+    "dev-build": planPipeline({
+      detection,
+      profile: "dev-build",
+      customConfig,
+    }),
+    "release-build": planPipeline({
+      detection,
+      profile: "release-build",
+      customConfig,
+    }),
+  };
+
+  if (recommendation.availableProfiles.includes("android-debug")) {
+    suggestedPipelines["android-debug"] = planPipeline({
+      detection,
+      profile: "android-debug",
+      customConfig,
+    });
+    suggestedPipelines["android-release"] = planPipeline({
+      detection,
+      profile: "android-release",
+      customConfig,
+    });
+  }
+  if (recommendation.availableProfiles.includes("ios-simulator")) {
+    suggestedPipelines["ios-simulator"] = planPipeline({
+      detection,
+      profile: "ios-simulator",
+      customConfig,
+    });
+    suggestedPipelines["ios-release"] = planPipeline({
+      detection,
+      profile: "ios-release",
+      customConfig,
+    });
+  }
+  if (customConfig?.pipelines?.["custom-pipeline"]) {
+    suggestedPipelines["custom-pipeline"] = planPipeline({
+      detection,
+      profile: "custom-pipeline",
+      customConfig,
+    });
+  }
+
   res.json({
     ok: true,
     path: target,
     folderName,
-    appName,
+    appName: detection?.name || appName,
     branch,
     commitHash,
     commitMsg,
-    packageManager,
+    packageManager: detection?.packageManager || packageManager,
     isGit,
+    primaryType: detection?.primaryType || "general",
+    category: detection?.category || "general",
+    technologies: detection?.technologies || [],
+    requiredCapabilities: detection?.requiredCapabilities || [],
+    isMonorepo: detection?.isMonorepo || false,
+    monorepoType: detection?.monorepoType || null,
+    subApps: detection?.subApps || [],
+    hasInfraxisConfig: Boolean(customConfig || detection?.hasInfraxisConfig),
+    hasDockerfile: detection?.hasDockerfile || false,
+    recommendedProfile: recommendation.recommendedProfile,
+    pipelineTarget: recommendation.pipelineTarget,
+    availableProfiles: recommendation.availableProfiles,
+    suggestedPipelines,
+    detection,
   });
+});
+
+// Universal Project Detection API
+app.post("/api/detect", requireAdmin, async (req, res) => {
+  const target = (req.body?.path || "").trim();
+  if (!target) return res.status(400).json({ error: "Missing path parameter" });
+
+  const parsedGit = parseGitUrl(target);
+  if (parsedGit) {
+    try {
+      const { resolveAccountAndToken, getAdapter } = require("./services/git-providers");
+      const { token, adapter } = await resolveAccountAndToken({ provider: parsedGit.provider });
+      const { detectRemoteRepository } = require("./services/remote-detector");
+      const activeAdapter = adapter || getAdapter(parsedGit.provider);
+      const detection = await detectRemoteRepository({
+        adapter: activeAdapter,
+        token,
+        owner: parsedGit.owner,
+        repo: parsedGit.repo,
+        ref: req.body?.branch || "HEAD",
+      });
+      return res.json({
+        ok: true,
+        path: target,
+        appName: detection.name || parsedGit.fullName,
+        branch: req.body?.branch || "main",
+        commitHash: "HEAD",
+        ...detection,
+      });
+    } catch (remoteErr) {
+      return res.status(500).json({ error: remoteErr.message });
+    }
+  }
+
+  try {
+    let resolved = target.replace(/^file:\/\//, "");
+    if (resolved.startsWith("~")) {
+      resolved = path.join(process.env.HOME || "", resolved.slice(1));
+    }
+    resolved = path.resolve(resolved);
+    const detection = detectRepository(resolved);
+    const customConfig = loadRepoConfig(resolved);
+    const recommendation = getRecommendedProfileAndTarget(detection, customConfig);
+
+    const suggestedPipelines = {
+      "pr-checks": planPipeline({
+        detection,
+        profile: "pr-checks",
+        customConfig,
+      }),
+      "dev-build": planPipeline({
+        detection,
+        profile: "dev-build",
+        customConfig,
+      }),
+      "release-build": planPipeline({
+        detection,
+        profile: "release-build",
+        customConfig,
+      }),
+    };
+
+    if (recommendation.availableProfiles.includes("android-debug")) {
+      suggestedPipelines["android-debug"] = planPipeline({
+        detection,
+        profile: "android-debug",
+        customConfig,
+      });
+      suggestedPipelines["android-release"] = planPipeline({
+        detection,
+        profile: "android-release",
+        customConfig,
+      });
+    }
+    if (recommendation.availableProfiles.includes("ios-simulator")) {
+      suggestedPipelines["ios-simulator"] = planPipeline({
+        detection,
+        profile: "ios-simulator",
+        customConfig,
+      });
+      suggestedPipelines["ios-release"] = planPipeline({
+        detection,
+        profile: "ios-release",
+        customConfig,
+      });
+    }
+    if (customConfig?.pipelines?.["custom-pipeline"]) {
+      suggestedPipelines["custom-pipeline"] = planPipeline({
+        detection,
+        profile: "custom-pipeline",
+        customConfig,
+      });
+    }
+
+    res.json({
+      ok: true,
+      detection,
+      customConfig,
+      recommendedProfile: recommendation.recommendedProfile,
+      pipelineTarget: recommendation.pipelineTarget,
+      availableProfiles: recommendation.availableProfiles,
+      suggestedPipelines,
+    });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// Universal Pipeline Planning API
+app.post("/api/pipelines/plan", requireAdmin, (req, res) => {
+  const {
+    detection,
+    profile = "pr-checks",
+    customConfig,
+    options,
+  } = req.body || {};
+  try {
+    const plan = planPipeline({ detection, profile, customConfig, options });
+    res.json({ ok: true, plan });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// Pull Requests & Checks APIs
+app.get("/api/pull-requests", requireAdmin, async (_req, res) => {
+  const prs = await db.pullRequests.listPullRequests(50);
+  res.json(prs);
+});
+
+app.get("/api/pull-requests/:id", requireAdmin, async (req, res) => {
+  const prs = await db.pullRequests.listPullRequests(100);
+  const found = prs.find((p) => p.id === req.params.id);
+  if (!found) return res.status(404).json({ error: "Pull request not found" });
+  res.json(found);
+});
+
+// Git Integrations (GitHub & Bitbucket)
+integrationsRouter.setCallbacks({
+  triggerWorkerOnJobQueued,
+  broadcastJobs,
+  broadcastPullRequests,
+});
+
+app.use(
+  "/api/integrations",
+  (req, res, next) => {
+    // OAuth callbacks and status do not require Bearer token
+    if (
+      (req.path.includes("/oauth/") && req.path.endsWith("/callback")) ||
+      req.path === "/status"
+    ) {
+      return next();
+    }
+    return requireAdmin(req, res, next);
+  },
+  integrationsRouter,
+);
+
+// Internal Git credential helper for worker checkouts (never exposes passwords in URLs)
+app.get("/api/jobs/:id/git-credentials", requireWorker, async (req, res) => {
+  try {
+    const job = await db.jobs.getJobById(req.params.id);
+    if (!job) return res.status(404).json({ error: "Job not found" });
+
+    let provider = job.metadata?.provider;
+    if (!provider) {
+      if (job.clone_url?.includes("github.com")) provider = "github";
+      else if (job.clone_url?.includes("bitbucket.org")) provider = "bitbucket";
+    }
+
+    if (!provider) {
+      return res.json({ header: null });
+    }
+
+    const { resolveAccountAndToken } = require("./services/git-providers");
+    const { token } = await resolveAccountAndToken({
+      accountId: job.metadata?.connectedAccountId || null,
+      provider,
+    });
+
+    if (!token) {
+      return res.json({ header: null });
+    }
+
+    const header = provider === "bitbucket" ? `Bearer ${token}` : `token ${token}`;
+    return res.json({ header, provider });
+  } catch (err) {
+    console.warn(`[Git Credentials] Failed for job ${req.params.id}:`, err.message);
+    res.json({ header: null });
+  }
+});
+
+// Pipeline Stages APIs
+app.get("/api/jobs/:id/stages", requireAdminOrWorker, async (req, res) => {
+  const stages = await db.pipelineStages.getJobPipelineStages(req.params.id);
+  res.json(stages);
+});
+
+app.post("/api/jobs/:id/stages", requireWorker, async (req, res) => {
+  const {
+    name,
+    category,
+    status,
+    duration_ms,
+    output,
+    started_at,
+    finished_at,
+  } = req.body || {};
+  if (!name) return res.status(400).json({ error: "Missing stage name" });
+  const recorded = await db.pipelineStages.recordPipelineStage({
+    job_id: req.params.id,
+    name,
+    category: category || "custom",
+    status: status || "pending",
+    duration_ms: duration_ms || 0,
+    output: output || null,
+    started_at: started_at || null,
+    finished_at: finished_at || null,
+  });
+  wsBroadcast({
+    type: "pipeline_stage",
+    jobId: req.params.id,
+    stage: recorded,
+  });
+  res.json({ ok: true, stage: recorded });
 });
 
 // Job Queue and Releases APIs
@@ -1617,7 +2051,16 @@ app.get("/api/workers", requireAdmin, async (_req, res) => {
 });
 
 app.post("/api/workers/heartbeat", requireWorker, async (req, res) => {
-  const { id, labels, current_job, platform, version } = req.body || {};
+  const {
+    id,
+    labels,
+    current_job,
+    platform,
+    version,
+    arch,
+    capabilities,
+    system_info,
+  } = req.body || {};
   if (
     !requiredString(id, 120) ||
     !Array.isArray(labels) ||
@@ -1631,6 +2074,9 @@ app.post("/api/workers/heartbeat", requireWorker, async (req, res) => {
     labels,
     current_job: current_job || null,
     platform: platform || "unknown",
+    arch: arch || "unknown",
+    capabilities: capabilities || {},
+    system_info: system_info || {},
     version: version || "0.2.0",
   });
 
@@ -1642,7 +2088,7 @@ app.post("/api/workers/heartbeat", requireWorker, async (req, res) => {
  * Atomic concurrent job claiming using SELECT ... FOR UPDATE SKIP LOCKED
  */
 app.post("/api/workers/claim", requireWorker, async (req, res) => {
-  const { id, labels } = req.body || {};
+  const { id, labels, capabilities, platform, arch } = req.body || {};
   if (!requiredString(id, 120) || !Array.isArray(labels)) {
     return res.status(400).json({ error: "Invalid worker payload" });
   }
@@ -1650,6 +2096,9 @@ app.post("/api/workers/claim", requireWorker, async (req, res) => {
   const claimed = await db.jobs.claimNextJob({
     workerId: id,
     labels,
+    capabilities: capabilities || {},
+    platform: platform || "unknown",
+    arch: arch || "unknown",
   });
 
   if (!claimed) {
@@ -1858,7 +2307,7 @@ app.delete("/api/artifacts", requireAdmin, async (req, res) => {
 
 app.post("/api/jobs/:id/finish", requireWorker, async (req, res) => {
   try {
-    const { exit_code, error } = req.body || {};
+    const { exit_code, error, check_results } = req.body || {};
 
     const result = await db.jobs.finishJob({
       jobId: req.params.id,
@@ -1869,6 +2318,47 @@ app.post("/api/jobs/:id/finish", requireWorker, async (req, res) => {
 
     if (!result.ok) {
       return res.status(409).json({ error: result.error });
+    }
+
+    // Check if this job has an associated Pull Request
+    const job = await db.jobs.getJobById(req.params.id);
+    if (job && job.commit_hash) {
+      const pr = await db.pullRequests.getPullRequestByCommit(job.commit_hash);
+      if (pr) {
+        const prStatus =
+          result.status === "succeeded"
+            ? "success"
+            : result.status === "cancelled"
+              ? "cancelled"
+              : "failure";
+
+        await db.pullRequests.upsertPullRequest({
+          repo: pr.repo,
+          provider: pr.provider,
+          pr_number: pr.pr_number,
+          title: pr.title,
+          source_branch: pr.source_branch,
+          target_branch: pr.target_branch,
+          commit_hash: pr.commit_hash,
+          status: prStatus,
+          latest_job_id: job.id,
+          check_results: check_results || pr.check_results || [],
+        });
+
+        reportCommitStatus({
+          provider: pr.provider,
+          repo: pr.repo,
+          commitHash: job.commit_hash,
+          state: prStatus === "success" ? "success" : "failure",
+          description:
+            prStatus === "success"
+              ? "Infraxis: All checks passed"
+              : `Infraxis: Check failed (${error || "exit code " + exit_code})`,
+          context: `infraxis/${job.kind || "pr-checks"}`,
+        }).catch(() => {});
+
+        await broadcastPullRequests();
+      }
     }
 
     await broadcastJobs();
@@ -1915,6 +2405,9 @@ app.post("/webhooks/github", async (req, res) => {
   const repo = body.repository;
   let commit = null;
   let branch = null;
+  let targetBranch = null;
+  let prNumber = null;
+  let prTitle = null;
   let kind = null;
 
   if (
@@ -1925,6 +2418,9 @@ app.post("/webhooks/github", async (req, res) => {
   ) {
     commit = body.pull_request?.head?.sha;
     branch = body.pull_request?.head?.ref;
+    targetBranch = body.pull_request?.base?.ref;
+    prNumber = body.pull_request?.number;
+    prTitle = body.pull_request?.title;
     kind = "pr-checks";
   } else if (event === "push") {
     commit = body.after;
@@ -1944,12 +2440,22 @@ app.post("/webhooks/github", async (req, res) => {
     ? rawClone.replace(/^https:\/\/[^@/]+@/i, "https://")
     : "";
 
+  const metadata = prNumber
+    ? {
+        prNumber,
+        prTitle,
+        targetBranch,
+        provider: "github",
+      }
+    : {};
+
   const fields = extractJobFields({
     ownerRepo: repo?.full_name,
     cloneUrl: cleanClone,
     commitHash: commit,
     branch,
     kind,
+    metadata,
   });
 
   const validationError = validateJobFields(fields);
@@ -1973,12 +2479,38 @@ app.post("/webhooks/github", async (req, res) => {
     packageManager: fields.packageManager || "auto",
     requestedBy: "github-webhook",
     idempotencyKey,
+    metadata: fields.metadata,
   });
 
   if (isDuplicate) {
     return res
       .status(200)
       .json({ queued: false, duplicate: true, id: job.id, kind: job.kind });
+  }
+
+  if (prNumber) {
+    await db.pullRequests.upsertPullRequest({
+      repo: fields.ownerRepo,
+      provider: "github",
+      pr_number: prNumber,
+      title: prTitle,
+      source_branch: branch,
+      target_branch: targetBranch || "main",
+      commit_hash: commit,
+      status: "pending",
+      latest_job_id: job.id,
+    });
+
+    reportCommitStatus({
+      provider: "github",
+      repo: fields.ownerRepo,
+      commitHash: commit,
+      state: "pending",
+      description: "Infraxis: PR checks queued",
+      context: "infraxis/pr-checks",
+    }).catch(() => {});
+
+    await broadcastPullRequests();
   }
 
   triggerWorkerOnJobQueued();
@@ -2004,14 +2536,26 @@ app.post("/webhooks/bitbucket", async (req, res) => {
   }
 
   const repo = body.repository;
-  const commit =
-    event === "pullrequest:created" || event === "pullrequest:updated"
-      ? body.pullrequest?.source?.commit?.hash
-      : body.push?.changes?.find((c) => c.new)?.new?.target?.hash;
-  const branch =
-    event === "pullrequest:created" || event === "pullrequest:updated"
-      ? body.pullrequest?.source?.branch?.name
-      : body.push?.changes?.find((c) => c.new)?.new?.name;
+  let commit = null;
+  let branch = null;
+  let targetBranch = null;
+  let prNumber = null;
+  let prTitle = null;
+  let kind = null;
+
+  if (event.startsWith("pullrequest:")) {
+    commit = body.pullrequest?.source?.commit?.hash;
+    branch = body.pullrequest?.source?.branch?.name;
+    targetBranch = body.pullrequest?.destination?.branch?.name;
+    prNumber = body.pullrequest?.id;
+    prTitle = body.pullrequest?.title;
+    kind = "pr-checks";
+  } else {
+    commit = body.push?.changes?.find((c) => c.new)?.new?.target?.hash;
+    branch = body.push?.changes?.find((c) => c.new)?.new?.name;
+    kind = "android-release";
+  }
+
   const rawClone =
     repo?.links?.clone?.find((c) => c.name === "https")?.href ||
     (repo?.full_name ? `https://bitbucket.org/${repo.full_name}.git` : "");
@@ -2019,9 +2563,14 @@ app.post("/webhooks/bitbucket", async (req, res) => {
     ? rawClone.replace(/^https:\/\/[^@/]+@/i, "https://")
     : "";
 
-  const kind = event.startsWith("pullrequest:")
-    ? "pr-checks"
-    : "android-release";
+  const metadata = prNumber
+    ? {
+        prNumber,
+        prTitle,
+        targetBranch,
+        provider: "bitbucket",
+      }
+    : {};
 
   const fields = extractJobFields({
     ownerRepo: repo?.full_name,
@@ -2029,6 +2578,7 @@ app.post("/webhooks/bitbucket", async (req, res) => {
     commitHash: commit,
     branch,
     kind,
+    metadata,
   });
 
   const validationError = validateJobFields(fields);
@@ -2052,12 +2602,38 @@ app.post("/webhooks/bitbucket", async (req, res) => {
     packageManager: fields.packageManager || "auto",
     requestedBy: "bitbucket-webhook",
     idempotencyKey,
+    metadata: fields.metadata,
   });
 
   if (isDuplicate) {
     return res
       .status(200)
       .json({ queued: false, duplicate: true, id: job.id, kind: job.kind });
+  }
+
+  if (prNumber) {
+    await db.pullRequests.upsertPullRequest({
+      repo: fields.ownerRepo,
+      provider: "bitbucket",
+      pr_number: prNumber,
+      title: prTitle,
+      source_branch: branch,
+      target_branch: targetBranch || "main",
+      commit_hash: commit,
+      status: "pending",
+      latest_job_id: job.id,
+    });
+
+    reportCommitStatus({
+      provider: "bitbucket",
+      repo: fields.ownerRepo,
+      commitHash: commit,
+      state: "pending",
+      description: "Infraxis: PR checks queued",
+      context: "infraxis/pr-checks",
+    }).catch(() => {});
+
+    await broadcastPullRequests();
   }
 
   triggerWorkerOnJobQueued();
